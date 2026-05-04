@@ -29,8 +29,11 @@ mkdir -p "${APP_DIR}/Contents/Resources"
 cp "${BIN_PATH}" "${APP_DIR}/Contents/MacOS/${APP_NAME}"
 chmod +x "${APP_DIR}/Contents/MacOS/${APP_NAME}"
 
-# Bundle the app icon (regenerate .icns from iconset if available so a fresh
-# source PNG just works without committing the binary .icns).
+# Build the app icon: squircle-mask the source PNG into the .iconset, then
+# compile to .icns. Falls back to a precompiled .icns if Swift isn't around.
+if [[ -f "icons/icon-source.png" && -f "scripts/make-icon.swift" ]]; then
+  swift scripts/make-icon.swift icons/icon-source.png icons/AppIcon.iconset >/dev/null
+fi
 if [[ -d "icons/AppIcon.iconset" ]]; then
   iconutil -c icns icons/AppIcon.iconset -o "${APP_DIR}/Contents/Resources/AppIcon.icns"
 elif [[ -f "icons/AppIcon.icns" ]]; then
