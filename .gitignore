@@ -8,6 +8,7 @@ Package.resolved
 
 # Build artifacts
 *.app/
+dist/
 
 # macOS
 .DS_Store
