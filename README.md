@@ -5,6 +5,10 @@ three-panel aesthetic — player, 10-band equalizer, playlist — with beveled
 plastic buttons, neon-green LCD readouts, yellow EQ thumbs, and a falling
 spectrum analyzer.
 
+<p align="center">
+  <img src="docs/preview.png" alt="Minpaw running on macOS" width="420">
+</p>
+
 ## Features
 
 - Native SwiftUI window, fixed size, custom `_ □ ×` chrome controls
