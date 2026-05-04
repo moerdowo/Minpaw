@@ -47,11 +47,6 @@ swift run
 # 2. Or assemble an .app bundle you can double-click
 ./build-app.sh release
 open Minpaw.app
-
-# 3. Or cut a signed + notarized release DMG (needs a Developer ID
-#    Application identity in your keychain; password via keychain
-#    profile or env)
-./scripts/make-dmg.sh 0.1.0
 ```
 
 Then drag any `.mp3` (or other audio) files onto the window, or click **ADD**.
