@@ -1,0 +1,18 @@
+# Xcode / Swift
+.build/
+.swiftpm/
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+Package.resolved
+
+# Build artifacts
+Lumen.app/
+*.app/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
