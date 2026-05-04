@@ -5,6 +5,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+        if let bundleIcon = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
+           let img = NSImage(contentsOf: bundleIcon) {
+            NSApp.applicationIconImage = img
+        } else {
+            // swift-run path: pick up icons/AppIcon.icns next to the package
+            let candidates = [
+                "icons/AppIcon.icns",
+                "../icons/AppIcon.icns",
+                "../../icons/AppIcon.icns"
+            ]
+            for path in candidates {
+                if let img = NSImage(contentsOfFile: path) {
+                    NSApp.applicationIconImage = img
+                    break
+                }
+            }
+        }
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 }

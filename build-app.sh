@@ -29,6 +29,14 @@ mkdir -p "${APP_DIR}/Contents/Resources"
 cp "${BIN_PATH}" "${APP_DIR}/Contents/MacOS/${APP_NAME}"
 chmod +x "${APP_DIR}/Contents/MacOS/${APP_NAME}"
 
+# Bundle the app icon (regenerate .icns from iconset if available so a fresh
+# source PNG just works without committing the binary .icns).
+if [[ -d "icons/AppIcon.iconset" ]]; then
+  iconutil -c icns icons/AppIcon.iconset -o "${APP_DIR}/Contents/Resources/AppIcon.icns"
+elif [[ -f "icons/AppIcon.icns" ]]; then
+  cp "icons/AppIcon.icns" "${APP_DIR}/Contents/Resources/AppIcon.icns"
+fi
+
 cat > "${APP_DIR}/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -38,6 +46,7 @@ cat > "${APP_DIR}/Contents/Info.plist" <<EOF
   <key>CFBundleDisplayName</key><string>${APP_NAME}</string>
   <key>CFBundleIdentifier</key><string>${BUNDLE_ID}</string>
   <key>CFBundleExecutable</key><string>${APP_NAME}</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.1.0</string>
   <key>CFBundleVersion</key><string>1</string>

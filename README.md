@@ -1,4 +1,8 @@
-# Minpaw
+<p align="center">
+  <img src="docs/logo.png" alt="Minpaw" width="160">
+</p>
+
+<h1 align="center">Minpaw</h1>
 
 A native macOS MP3 player built with SwiftUI and AVAudioEngine. Classic Winamp
 three-panel aesthetic — player, 10-band equalizer, playlist — with beveled
