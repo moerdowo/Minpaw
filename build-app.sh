@@ -4,8 +4,8 @@ set -euo pipefail
 # Builds Lumen.app from the SwiftPM executable target.
 # Output: ./Lumen.app
 
-APP_NAME="Lumen"
-BUNDLE_ID="com.local.lumen"
+APP_NAME="Minpaw"
+BUNDLE_ID="com.local.minpaw"
 BIN_NAME="MP3Player"
 APP_DIR="${APP_NAME}.app"
 CONFIG="${1:-release}"

@@ -7,7 +7,6 @@ DerivedData/
 Package.resolved
 
 # Build artifacts
-Lumen.app/
 *.app/
 
 # macOS

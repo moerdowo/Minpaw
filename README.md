@@ -32,7 +32,7 @@ swift run
 
 # 2. Or build a real .app bundle you can double-click
 ./build-app.sh release
-open Lumen.app
+open Minpaw.app
 ```
 
 Then drag any `.mp3` (or other audio) files onto the window, or click **ADD**.
