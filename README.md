@@ -13,6 +13,16 @@ spectrum analyzer.
   <img src="docs/preview.png" alt="Minpaw running on macOS" width="420">
 </p>
 
+## Install
+
+Grab the signed and notarized DMG from the
+[latest release](https://github.com/moerdowo/Minpaw/releases/latest),
+mount it, drag **Minpaw.app** into `/Applications`, and launch.
+
+Requires macOS 14+ on Apple Silicon. The bundle is signed with a
+Developer ID Application certificate and notarized by Apple, so it
+opens without Gatekeeper warnings even on the first run.
+
 ## Features
 
 - Native SwiftUI window, fixed size, custom `_ □ ×` chrome controls
@@ -26,17 +36,22 @@ spectrum analyzer.
 - Reads ID3/iTunes metadata: title, artist, album, embedded artwork
 - Supports MP3, M4A/AAC, WAV, AIFF, FLAC (anything AVFoundation can decode)
 
-## Run
+## Build from source
 
-Requires macOS 14+ and Swift 5.9 (Xcode 15) toolchain.
+Requires macOS 14+ and the Swift 5.9 / Xcode 15 toolchain.
 
 ```bash
-# 1. Run from source
+# 1. Run directly via SwiftPM
 swift run
 
-# 2. Or build a real .app bundle you can double-click
+# 2. Or assemble an .app bundle you can double-click
 ./build-app.sh release
 open Minpaw.app
+
+# 3. Or cut a signed + notarized release DMG (needs a Developer ID
+#    Application identity in your keychain; password via keychain
+#    profile or env)
+./scripts/make-dmg.sh 0.1.0
 ```
 
 Then drag any `.mp3` (or other audio) files onto the window, or click **ADD**.
@@ -58,9 +73,11 @@ Sources/MP3Player/
 
 ## Notes
 
-- The `.app` bundle is ad-hoc codesigned (`codesign -s -`) so Gatekeeper allows
-  local launch without quarantine fuss. For distribution, sign with a real
-  Developer ID and notarize.
+- `build-app.sh` ad-hoc codesigns the bundle so Gatekeeper accepts it locally.
+  For distribution use `scripts/make-dmg.sh`, which signs with a real
+  Developer ID Application identity, packages a UDZO DMG, and signs the DMG
+  too. Notarize the result with `xcrun notarytool submit ... --wait` and
+  staple it with `xcrun stapler staple`.
 - Spectrum is per-band RMS of the live mixer output — responsive to overall
   energy, not spectrally accurate. Swap in vDSP FFT in
   `PlayerEngine.processSpectrum` if you want true frequency bins.
