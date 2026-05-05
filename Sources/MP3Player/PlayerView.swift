@@ -137,19 +137,21 @@ struct PlayerView: View {
             }
             Spacer().frame(width: 8)
             VolumeKnob()
-            BalanceKnob()
-            Spacer()
+            Spacer().frame(width: 8)
             PlasticButton("SHUFFLE",
                           pressed: player.shuffle,
-                          width: 50, height: 12) {
+                          width: 48, height: 12) {
                 player.shuffle.toggle()
             }
             PlasticButton("REPEAT",
-                          pressed: player.repeatMode != .off,
+                          pressed: player.repeatMode == .one,
                           width: 38, height: 12) {
-                let modes = RepeatMode.allCases
-                let i = modes.firstIndex(of: player.repeatMode) ?? 0
-                player.repeatMode = modes[(i + 1) % modes.count]
+                player.repeatMode = (player.repeatMode == .one) ? .off : .one
+            }
+            PlasticButton("ALL",
+                          pressed: player.repeatMode == .all,
+                          width: 26, height: 12) {
+                player.repeatMode = (player.repeatMode == .all) ? .off : .all
             }
         }
     }
@@ -394,21 +396,7 @@ struct VolumeKnob: View {
             fillTone: Win.lcdGreen,
             trackHeight: 6
         )
-        .frame(width: 68, height: 14)
-    }
-}
-
-struct BalanceKnob: View {
-    @EnvironmentObject var player: PlayerEngine
-    var body: some View {
-        WinSlider(
-            value: Binding(get: { Double(player.balance) },
-                           set: { player.balance = Float($0) }),
-            range: -1...1,
-            fillTone: Win.lcdGreen,
-            trackHeight: 6,
-            showFill: false
-        )
-        .frame(width: 38, height: 14)
+        .frame(maxWidth: .infinity)
+        .frame(height: 14)
     }
 }

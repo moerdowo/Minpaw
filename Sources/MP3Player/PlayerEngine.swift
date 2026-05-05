@@ -19,8 +19,16 @@ final class PlayerEngine: ObservableObject {
     @Published var balance: Float = 0 {
         didSet { engine.mainMixerNode.pan = balance }
     }
-    @Published var shuffle: Bool = false
-    @Published var repeatMode: RepeatMode = .off
+    @Published var shuffle: Bool = false {
+        didSet {
+            if shuffle && repeatMode != .off { repeatMode = .off }
+        }
+    }
+    @Published var repeatMode: RepeatMode = .off {
+        didSet {
+            if repeatMode != .off && shuffle { shuffle = false }
+        }
+    }
     @Published var preampGain: Float = 0 {
         didSet { eq.globalGain = preampGain }
     }
@@ -37,6 +45,11 @@ final class PlayerEngine: ObservableObject {
     private var seekFrame: AVAudioFramePosition = 0
     private var fileSampleRate: Double = 44100
     private var ticker: Timer?
+    // Bumped every time we schedule (or invalidate) a buffer. The
+    // completion handler captures the value at schedule time and only
+    // fires `handleEnd` if the value still matches — so seeks, stops,
+    // and track-changes don't trigger spurious end-of-track callbacks.
+    private var scheduleToken: Int = 0
 
     var currentTrack: Track? {
         guard let i = currentIndex, i >= 0, i < tracks.count else { return nil }
@@ -128,23 +141,66 @@ final class PlayerEngine: ObservableObject {
         let played = Double(playerTime.sampleTime) / playerTime.sampleRate
         let absolute = Double(seekFrame) / fileSampleRate + played
         currentTime = max(0, min(duration, absolute))
-        if duration > 0, currentTime >= duration - 0.05 {
-            handleEnd()
-        }
+        // End-of-track is detected via the schedule completion handler,
+        // not from time tracking — playerTime stops updating once the
+        // buffer is consumed, so a tick-based guard would never fire.
     }
 
     private func handleEnd() {
         switch repeatMode {
         case .one:
-            seek(to: 0); play()
+            seek(to: 0)
+            play()
         case .all:
             next()
         case .off:
-            if let i = currentIndex, i + 1 < tracks.count {
+            if shuffle {
+                // With shuffle on, keep playing forever — the user has
+                // to stop manually. Matches typical shuffle UX.
+                next()
+            } else if let i = currentIndex, i + 1 < tracks.count {
                 next()
             } else {
                 stop()
             }
+        }
+    }
+
+    /// Schedules the given file (or segment of it) for playback and arms
+    /// a completion handler that fires `handleEnd` once the audio has
+    /// actually been rendered. Returns after the schedule call is queued.
+    private func scheduleAndArm(file: AVAudioFile, startingFrame: AVAudioFramePosition) {
+        scheduleToken &+= 1
+        let token = scheduleToken
+        if startingFrame == 0 {
+            playerNode.scheduleFile(
+                file,
+                at: nil,
+                completionCallbackType: .dataPlayedBack
+            ) { [weak self] _ in
+                self?.completionFired(token: token)
+            }
+        } else {
+            let remaining = file.length - startingFrame
+            guard remaining > 0 else { return }
+            playerNode.scheduleSegment(
+                file,
+                startingFrame: startingFrame,
+                frameCount: AVAudioFrameCount(remaining),
+                at: nil,
+                completionCallbackType: .dataPlayedBack
+            ) { [weak self] _ in
+                self?.completionFired(token: token)
+            }
+        }
+    }
+
+    nonisolated private func completionFired(token: Int) {
+        Task { @MainActor [weak self] in
+            guard let self,
+                  self.scheduleToken == token,
+                  self.isPlaying else { return }
+            self.handleEnd()
         }
     }
 
@@ -210,7 +266,7 @@ final class PlayerEngine: ObservableObject {
             seekFrame = 0
             currentTime = 0
             playerNode.stop()
-            playerNode.scheduleFile(file, at: nil, completionHandler: nil)
+            scheduleAndArm(file: file, startingFrame: 0)
             if autoplay {
                 if !engine.isRunning { try? engine.start() }
                 playerNode.play()
@@ -255,6 +311,9 @@ final class PlayerEngine: ObservableObject {
 
     func stop() {
         playerNode.stop()
+        // Bump the token so any in-flight completion from the prior
+        // schedule is ignored when it fires.
+        scheduleToken &+= 1
         isPlaying = false
         seekFrame = 0
         currentTime = 0
@@ -266,13 +325,7 @@ final class PlayerEngine: ObservableObject {
 
     func next() {
         guard !tracks.isEmpty else { return }
-        let target: Int
-        if shuffle {
-            target = Int.random(in: 0..<tracks.count)
-        } else {
-            target = ((currentIndex ?? -1) + 1) % tracks.count
-        }
-        play(index: target)
+        play(index: shuffle ? randomNextIndex() : ((currentIndex ?? -1) + 1) % tracks.count)
     }
 
     func previous() {
@@ -281,13 +334,16 @@ final class PlayerEngine: ObservableObject {
             seek(to: 0)
             return
         }
-        let target: Int
-        if shuffle {
-            target = Int.random(in: 0..<tracks.count)
-        } else {
-            target = ((currentIndex ?? 0) - 1 + tracks.count) % tracks.count
+        play(index: shuffle ? randomNextIndex() : ((currentIndex ?? 0) - 1 + tracks.count) % tracks.count)
+    }
+
+    private func randomNextIndex() -> Int {
+        guard tracks.count > 1 else { return 0 }
+        var pick = Int.random(in: 0..<tracks.count)
+        while pick == currentIndex {
+            pick = Int.random(in: 0..<tracks.count)
         }
-        play(index: target)
+        return pick
     }
 
     func seek(to time: TimeInterval) {
@@ -299,11 +355,7 @@ final class PlayerEngine: ObservableObject {
         let wasPlaying = isPlaying
         playerNode.stop()
         seekFrame = frame
-        playerNode.scheduleSegment(file,
-                                   startingFrame: frame,
-                                   frameCount: AVAudioFrameCount(remaining),
-                                   at: nil,
-                                   completionHandler: nil)
+        scheduleAndArm(file: file, startingFrame: frame)
         currentTime = target
         if wasPlaying {
             if !engine.isRunning { try? engine.start() }
