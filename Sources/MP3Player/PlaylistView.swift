@@ -2,14 +2,9 @@ import SwiftUI
 import UniformTypeIdentifiers
 import AppKit
 
-private let trackUTI = "app.minpaw.track"
-private let trackUTType: UTType = UTType(exportedAs: trackUTI)
-
 struct PlaylistView: View {
     @EnvironmentObject var player: PlayerEngine
     @State private var selection: Set<UUID> = []
-    @State private var dropTargetID: UUID? = nil
-    @State private var dropAtEnd: Bool = false
 
     var body: some View {
         WinampPanel(title: "MINPAW PLAYLIST") {
@@ -27,20 +22,22 @@ struct PlaylistView: View {
 
     private var trackList: some View {
         ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    if player.tracks.isEmpty {
-                        emptyState
-                    } else {
+            Group {
+                if player.tracks.isEmpty {
+                    emptyState
+                } else {
+                    List {
                         ForEach(Array(player.tracks.enumerated()), id: \.element.id) { idx, track in
                             TrackRow(
                                 index: idx,
                                 track: track,
                                 isPlaying: player.currentIndex == idx,
-                                isSelected: selection.contains(track.id),
-                                isDropTarget: dropTargetID == track.id
+                                isSelected: selection.contains(track.id)
                             )
                             .id(track.id)
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                            .listRowInsets(EdgeInsets())
                             .contentShape(Rectangle())
                             .onTapGesture(count: 2) {
                                 player.play(index: idx)
@@ -52,28 +49,6 @@ struct PlaylistView: View {
                                     selection = [track.id]
                                 }
                             }
-                            .onDrag {
-                                let id = track.id
-                                let provider = NSItemProvider()
-                                provider.registerDataRepresentation(
-                                    forTypeIdentifier: trackUTI,
-                                    visibility: .ownProcess
-                                ) { completion in
-                                    completion(id.uuidString.data(using: .utf8), nil)
-                                    return nil
-                                }
-                                return provider
-                            }
-                            .onDrop(
-                                of: [trackUTType],
-                                delegate: TrackDropDelegate(
-                                    targetID: track.id,
-                                    targetIndex: idx,
-                                    player: player,
-                                    dropTargetID: $dropTargetID,
-                                    dropAtEnd: $dropAtEnd
-                                )
-                            )
                             .contextMenu {
                                 Button("Play") { player.play(index: idx) }
                                 Button("Reveal in Finder") {
@@ -86,32 +61,20 @@ struct PlaylistView: View {
                                 }
                             }
                         }
-                        Color.clear
-                            .frame(height: 24)
-                            .overlay(alignment: .top) {
-                                if dropAtEnd {
-                                    Rectangle()
-                                        .fill(Win.lcdGreen)
-                                        .frame(height: 2)
-                                        .shadow(color: Win.lcdGreen.opacity(0.7), radius: 2)
-                                }
-                            }
-                            .onDrop(
-                                of: [trackUTType],
-                                delegate: TrackDropDelegate(
-                                    targetID: nil,
-                                    targetIndex: player.tracks.count,
-                                    player: player,
-                                    dropTargetID: $dropTargetID,
-                                    dropAtEnd: $dropAtEnd
-                                )
-                            )
+                        .onMove { from, to in
+                            player.moveTracks(fromOffsets: from, toOffset: to)
+                        }
                     }
-                }
-            }
-            .onChange(of: player.currentIndex) { _, new in
-                if let i = new, i < player.tracks.count {
-                    withAnimation { proxy.scrollTo(player.tracks[i].id, anchor: .center) }
+                    .listStyle(.plain)
+                    .scrollContentBackground(.hidden)
+                    .background(Win.lcdBg)
+                    .alternatingRowBackgrounds(.disabled)
+                    .environment(\.defaultMinListRowHeight, 18)
+                    .onChange(of: player.currentIndex) { _, new in
+                        if let i = new, i < player.tracks.count {
+                            withAnimation { proxy.scrollTo(player.tracks[i].id, anchor: .center) }
+                        }
+                    }
                 }
             }
         }
@@ -202,72 +165,11 @@ struct PlaylistView: View {
     }
 }
 
-private struct TrackDropDelegate: DropDelegate {
-    let targetID: UUID?
-    let targetIndex: Int
-    let player: PlayerEngine
-    @Binding var dropTargetID: UUID?
-    @Binding var dropAtEnd: Bool
-
-    func validateDrop(info: DropInfo) -> Bool {
-        info.hasItemsConforming(to: [trackUTType])
-    }
-
-    func dropUpdated(info: DropInfo) -> DropProposal? {
-        DropProposal(operation: .move)
-    }
-
-    func dropEntered(info: DropInfo) {
-        if let id = targetID {
-            dropTargetID = id
-            dropAtEnd = false
-        } else {
-            dropAtEnd = true
-            dropTargetID = nil
-        }
-    }
-
-    func dropExited(info: DropInfo) {
-        if targetID == nil {
-            dropAtEnd = false
-        } else if dropTargetID == targetID {
-            dropTargetID = nil
-        }
-    }
-
-    func performDrop(info: DropInfo) -> Bool {
-        let providers = info.itemProviders(for: [trackUTType])
-        guard let provider = providers.first else { return false }
-        let target = targetIndex
-        provider.loadDataRepresentation(forTypeIdentifier: trackUTI) { data, _ in
-            guard let data,
-                  let s = String(data: data, encoding: .utf8),
-                  let sourceID = UUID(uuidString: s) else { return }
-            DispatchQueue.main.async {
-                guard let from = player.tracks.firstIndex(where: { $0.id == sourceID }) else {
-                    return
-                }
-                let clamped = max(0, min(target, player.tracks.count))
-                let toOffset = from < clamped
-                    ? clamped + (clamped == player.tracks.count ? 0 : 1)
-                    : clamped
-                if from != toOffset && from + 1 != toOffset {
-                    player.moveTracks(fromOffsets: IndexSet(integer: from), toOffset: toOffset)
-                }
-                dropTargetID = nil
-                dropAtEnd = false
-            }
-        }
-        return true
-    }
-}
-
 struct TrackRow: View {
     let index: Int
     let track: Track
     let isPlaying: Bool
     let isSelected: Bool
-    var isDropTarget: Bool = false
 
     var body: some View {
         HStack(spacing: 6) {
@@ -284,15 +186,8 @@ struct TrackRow: View {
         .shadow(color: (isPlaying ? Win.amber : Win.lcdGreen).opacity(isSelected ? 0 : 0.45), radius: 1)
         .padding(.horizontal, 6)
         .padding(.vertical, 1.5)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(isSelected ? Color(hex: 0x0A2F4D) : Color.clear)
-        .overlay(alignment: .top) {
-            if isDropTarget {
-                Rectangle()
-                    .fill(Win.lcdGreen)
-                    .frame(height: 2)
-                    .shadow(color: Win.lcdGreen.opacity(0.7), radius: 2)
-            }
-        }
     }
 
     private var displayLine: String {
