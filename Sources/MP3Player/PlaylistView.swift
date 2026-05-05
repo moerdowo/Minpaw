@@ -26,42 +26,44 @@ struct PlaylistView: View {
                 if player.tracks.isEmpty {
                     emptyState
                 } else {
-                    List {
-                        ForEach(Array(player.tracks.enumerated()), id: \.element.id) { idx, track in
+                    List(selection: $selection) {
+                        ForEach(player.tracks) { track in
+                            let idx = player.tracks.firstIndex(where: { $0.id == track.id }) ?? 0
                             TrackRow(
                                 index: idx,
                                 track: track,
                                 isPlaying: player.currentIndex == idx,
                                 isSelected: selection.contains(track.id)
                             )
-                            .id(track.id)
                             .listRowBackground(Color.clear)
                             .listRowSeparator(.hidden)
                             .listRowInsets(EdgeInsets())
-                            .contentShape(Rectangle())
+                            .tag(track.id)
                             .onTapGesture(count: 2) {
-                                player.play(index: idx)
-                            }
-                            .onTapGesture {
-                                if selection.contains(track.id) {
-                                    selection.remove(track.id)
-                                } else {
-                                    selection = [track.id]
+                                if let i = player.tracks.firstIndex(where: { $0.id == track.id }) {
+                                    player.play(index: i)
                                 }
                             }
                             .contextMenu {
-                                Button("Play") { player.play(index: idx) }
+                                Button("Play") {
+                                    if let i = player.tracks.firstIndex(where: { $0.id == track.id }) {
+                                        player.play(index: i)
+                                    }
+                                }
                                 Button("Reveal in Finder") {
                                     NSWorkspace.shared.activateFileViewerSelecting([track.url])
                                 }
                                 Divider()
                                 Button("Remove") {
-                                    player.remove(at: IndexSet(integer: idx))
-                                    selection.remove(track.id)
+                                    if let i = player.tracks.firstIndex(where: { $0.id == track.id }) {
+                                        player.remove(at: IndexSet(integer: i))
+                                        selection.remove(track.id)
+                                    }
                                 }
                             }
                         }
                         .onMove { from, to in
+                            NSLog("[Minpaw] onMove from=\(Array(from)) to=\(to)")
                             player.moveTracks(fromOffsets: from, toOffset: to)
                         }
                     }
