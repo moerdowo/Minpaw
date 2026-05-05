@@ -4,6 +4,8 @@ import UniformTypeIdentifiers
 
 struct PlayerView: View {
     @EnvironmentObject var player: PlayerEngine
+    @AppStorage("showEqualizer") private var showEqualizer: Bool = true
+    @AppStorage("showPlaylist") private var showPlaylist: Bool = true
     @State private var scrollOffset: CGFloat = 0
     @State private var scrollTimer: Timer?
 
@@ -103,10 +105,12 @@ struct PlayerView: View {
                 .frame(width: 76, height: 22)
             ProgressTrack()
                 .frame(height: 10)
-            PlasticButton("EQ", pressed: false, width: 22, height: 12) {}
-                .opacity(0.55)
-            PlasticButton("PL", pressed: false, width: 22, height: 12) {}
-                .opacity(0.55)
+            PlasticButton("EQ", pressed: showEqualizer, width: 22, height: 12) {
+                showEqualizer.toggle()
+            }
+            PlasticButton("PL", pressed: showPlaylist, width: 22, height: 12) {
+                showPlaylist.toggle()
+            }
         }
     }
 

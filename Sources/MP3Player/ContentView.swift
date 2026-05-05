@@ -3,12 +3,18 @@ import UniformTypeIdentifiers
 
 struct ContentView: View {
     @EnvironmentObject var player: PlayerEngine
+    @AppStorage("showEqualizer") private var showEqualizer: Bool = true
+    @AppStorage("showPlaylist") private var showPlaylist: Bool = true
 
     var body: some View {
         VStack(spacing: 4) {
             PlayerView()
-            EqualizerView()
-            PlaylistView()
+            if showEqualizer {
+                EqualizerView()
+            }
+            if showPlaylist {
+                PlaylistView()
+            }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)

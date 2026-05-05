@@ -38,7 +38,7 @@ echo "==> Identity: ${IDENTITY}"
 echo "==> Team:     ${TEAM_ID}"
 
 echo "==> Building release .app"
-./build-app.sh release >/dev/null
+VERSION="${VERSION}" ./build-app.sh release >/dev/null
 
 echo "==> Signing ${APP_DIR}"
 # Sign nested resources first (none today, but future-proof against frameworks).
