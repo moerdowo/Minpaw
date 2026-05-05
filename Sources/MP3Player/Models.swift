@@ -1,5 +1,18 @@
 import Foundation
 import AVFoundation
+import CoreTransferable
+import UniformTypeIdentifiers
+
+extension UTType {
+    static var minpawTrack: UTType { UTType(exportedAs: "app.minpaw.track") }
+}
+
+struct TrackTransfer: Codable, Transferable {
+    let trackID: UUID
+    static var transferRepresentation: some TransferRepresentation {
+        CodableRepresentation(contentType: .minpawTrack)
+    }
+}
 
 struct Track: Identifiable, Hashable {
     let id = UUID()

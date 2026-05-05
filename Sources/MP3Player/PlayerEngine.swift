@@ -164,6 +164,14 @@ final class PlayerEngine: ObservableObject {
         }
     }
 
+    func moveTracks(fromOffsets source: IndexSet, toOffset destination: Int) {
+        let nowPlayingID = currentTrack?.id
+        tracks.move(fromOffsets: source, toOffset: destination)
+        if let id = nowPlayingID {
+            currentIndex = tracks.firstIndex(where: { $0.id == id })
+        }
+    }
+
     func remove(at indices: IndexSet) {
         let wasCurrent = currentIndex
         tracks.remove(atOffsets: indices)

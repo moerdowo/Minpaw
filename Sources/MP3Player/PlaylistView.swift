@@ -5,6 +5,8 @@ import AppKit
 struct PlaylistView: View {
     @EnvironmentObject var player: PlayerEngine
     @State private var selection: Set<UUID> = []
+    @State private var dropTargetID: UUID? = nil
+    @State private var dropAtEnd: Bool = false
 
     var body: some View {
         WinampPanel(title: "MINPAW PLAYLIST") {
@@ -32,7 +34,8 @@ struct PlaylistView: View {
                                 index: idx,
                                 track: track,
                                 isPlaying: player.currentIndex == idx,
-                                isSelected: selection.contains(track.id)
+                                isSelected: selection.contains(track.id),
+                                isDropTarget: dropTargetID == track.id
                             )
                             .id(track.id)
                             .contentShape(Rectangle())
@@ -46,6 +49,15 @@ struct PlaylistView: View {
                                     selection = [track.id]
                                 }
                             }
+                            .draggable(TrackTransfer(trackID: track.id))
+                            .dropDestination(for: TrackTransfer.self) { payloads, _ in
+                                guard let payload = payloads.first else { return false }
+                                handleReorder(sourceID: payload.trackID, targetIndex: idx)
+                                dropTargetID = nil
+                                return true
+                            } isTargeted: { targeted in
+                                dropTargetID = targeted ? track.id : (dropTargetID == track.id ? nil : dropTargetID)
+                            }
                             .contextMenu {
                                 Button("Play") { player.play(index: idx) }
                                 Button("Reveal in Finder") {
@@ -58,6 +70,24 @@ struct PlaylistView: View {
                                 }
                             }
                         }
+                        Color.clear
+                            .frame(height: 16)
+                            .overlay(alignment: .top) {
+                                if dropAtEnd {
+                                    Rectangle()
+                                        .fill(Win.lcdGreen)
+                                        .frame(height: 2)
+                                        .shadow(color: Win.lcdGreen.opacity(0.7), radius: 2)
+                                }
+                            }
+                            .dropDestination(for: TrackTransfer.self) { payloads, _ in
+                                guard let payload = payloads.first else { return false }
+                                handleReorder(sourceID: payload.trackID, targetIndex: player.tracks.count)
+                                dropAtEnd = false
+                                return true
+                            } isTargeted: { targeted in
+                                dropAtEnd = targeted
+                            }
                     }
                 }
             }
@@ -152,6 +182,14 @@ struct PlaylistView: View {
         player.remove(at: indices)
         selection.removeAll()
     }
+
+    private func handleReorder(sourceID: UUID, targetIndex: Int) {
+        guard let from = player.tracks.firstIndex(where: { $0.id == sourceID }) else { return }
+        let clamped = max(0, min(targetIndex, player.tracks.count))
+        let toOffset = from < clamped ? clamped + (clamped == player.tracks.count ? 0 : 1) : clamped
+        guard from != toOffset && from + 1 != toOffset else { return }
+        player.moveTracks(fromOffsets: IndexSet(integer: from), toOffset: toOffset)
+    }
 }
 
 struct TrackRow: View {
@@ -159,6 +197,7 @@ struct TrackRow: View {
     let track: Track
     let isPlaying: Bool
     let isSelected: Bool
+    var isDropTarget: Bool = false
 
     var body: some View {
         HStack(spacing: 6) {
@@ -176,6 +215,14 @@ struct TrackRow: View {
         .padding(.horizontal, 6)
         .padding(.vertical, 1.5)
         .background(isSelected ? Color(hex: 0x0A2F4D) : Color.clear)
+        .overlay(alignment: .top) {
+            if isDropTarget {
+                Rectangle()
+                    .fill(Win.lcdGreen)
+                    .frame(height: 2)
+                    .shadow(color: Win.lcdGreen.opacity(0.7), radius: 2)
+            }
+        }
     }
 
     private var displayLine: String {
