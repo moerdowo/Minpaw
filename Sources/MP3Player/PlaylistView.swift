@@ -2,6 +2,9 @@ import SwiftUI
 import UniformTypeIdentifiers
 import AppKit
 
+private let trackUTI = "app.minpaw.track"
+private let trackUTType: UTType = UTType(exportedAs: trackUTI)
+
 struct PlaylistView: View {
     @EnvironmentObject var player: PlayerEngine
     @State private var selection: Set<UUID> = []
@@ -49,15 +52,28 @@ struct PlaylistView: View {
                                     selection = [track.id]
                                 }
                             }
-                            .draggable(TrackTransfer(trackID: track.id))
-                            .dropDestination(for: TrackTransfer.self) { payloads, _ in
-                                guard let payload = payloads.first else { return false }
-                                handleReorder(sourceID: payload.trackID, targetIndex: idx)
-                                dropTargetID = nil
-                                return true
-                            } isTargeted: { targeted in
-                                dropTargetID = targeted ? track.id : (dropTargetID == track.id ? nil : dropTargetID)
+                            .onDrag {
+                                let id = track.id
+                                let provider = NSItemProvider()
+                                provider.registerDataRepresentation(
+                                    forTypeIdentifier: trackUTI,
+                                    visibility: .ownProcess
+                                ) { completion in
+                                    completion(id.uuidString.data(using: .utf8), nil)
+                                    return nil
+                                }
+                                return provider
                             }
+                            .onDrop(
+                                of: [trackUTType],
+                                delegate: TrackDropDelegate(
+                                    targetID: track.id,
+                                    targetIndex: idx,
+                                    player: player,
+                                    dropTargetID: $dropTargetID,
+                                    dropAtEnd: $dropAtEnd
+                                )
+                            )
                             .contextMenu {
                                 Button("Play") { player.play(index: idx) }
                                 Button("Reveal in Finder") {
@@ -71,7 +87,7 @@ struct PlaylistView: View {
                             }
                         }
                         Color.clear
-                            .frame(height: 16)
+                            .frame(height: 24)
                             .overlay(alignment: .top) {
                                 if dropAtEnd {
                                     Rectangle()
@@ -80,14 +96,16 @@ struct PlaylistView: View {
                                         .shadow(color: Win.lcdGreen.opacity(0.7), radius: 2)
                                 }
                             }
-                            .dropDestination(for: TrackTransfer.self) { payloads, _ in
-                                guard let payload = payloads.first else { return false }
-                                handleReorder(sourceID: payload.trackID, targetIndex: player.tracks.count)
-                                dropAtEnd = false
-                                return true
-                            } isTargeted: { targeted in
-                                dropAtEnd = targeted
-                            }
+                            .onDrop(
+                                of: [trackUTType],
+                                delegate: TrackDropDelegate(
+                                    targetID: nil,
+                                    targetIndex: player.tracks.count,
+                                    player: player,
+                                    dropTargetID: $dropTargetID,
+                                    dropAtEnd: $dropAtEnd
+                                )
+                            )
                     }
                 }
             }
@@ -182,13 +200,65 @@ struct PlaylistView: View {
         player.remove(at: indices)
         selection.removeAll()
     }
+}
 
-    private func handleReorder(sourceID: UUID, targetIndex: Int) {
-        guard let from = player.tracks.firstIndex(where: { $0.id == sourceID }) else { return }
-        let clamped = max(0, min(targetIndex, player.tracks.count))
-        let toOffset = from < clamped ? clamped + (clamped == player.tracks.count ? 0 : 1) : clamped
-        guard from != toOffset && from + 1 != toOffset else { return }
-        player.moveTracks(fromOffsets: IndexSet(integer: from), toOffset: toOffset)
+private struct TrackDropDelegate: DropDelegate {
+    let targetID: UUID?
+    let targetIndex: Int
+    let player: PlayerEngine
+    @Binding var dropTargetID: UUID?
+    @Binding var dropAtEnd: Bool
+
+    func validateDrop(info: DropInfo) -> Bool {
+        info.hasItemsConforming(to: [trackUTType])
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func dropEntered(info: DropInfo) {
+        if let id = targetID {
+            dropTargetID = id
+            dropAtEnd = false
+        } else {
+            dropAtEnd = true
+            dropTargetID = nil
+        }
+    }
+
+    func dropExited(info: DropInfo) {
+        if targetID == nil {
+            dropAtEnd = false
+        } else if dropTargetID == targetID {
+            dropTargetID = nil
+        }
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        let providers = info.itemProviders(for: [trackUTType])
+        guard let provider = providers.first else { return false }
+        let target = targetIndex
+        provider.loadDataRepresentation(forTypeIdentifier: trackUTI) { data, _ in
+            guard let data,
+                  let s = String(data: data, encoding: .utf8),
+                  let sourceID = UUID(uuidString: s) else { return }
+            DispatchQueue.main.async {
+                guard let from = player.tracks.firstIndex(where: { $0.id == sourceID }) else {
+                    return
+                }
+                let clamped = max(0, min(target, player.tracks.count))
+                let toOffset = from < clamped
+                    ? clamped + (clamped == player.tracks.count ? 0 : 1)
+                    : clamped
+                if from != toOffset && from + 1 != toOffset {
+                    player.moveTracks(fromOffsets: IndexSet(integer: from), toOffset: toOffset)
+                }
+                dropTargetID = nil
+                dropAtEnd = false
+            }
+        }
+        return true
     }
 }
 
