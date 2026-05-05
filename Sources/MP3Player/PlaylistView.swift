@@ -21,63 +21,25 @@ struct PlaylistView: View {
     }
 
     private var trackList: some View {
-        ScrollViewReader { proxy in
-            Group {
-                if player.tracks.isEmpty {
-                    emptyState
-                } else {
-                    List(selection: $selection) {
-                        ForEach(player.tracks) { track in
-                            let idx = player.tracks.firstIndex(where: { $0.id == track.id }) ?? 0
-                            TrackRow(
-                                index: idx,
-                                track: track,
-                                isPlaying: player.currentIndex == idx,
-                                isSelected: selection.contains(track.id)
-                            )
-                            .listRowBackground(Color.clear)
-                            .listRowSeparator(.hidden)
-                            .listRowInsets(EdgeInsets())
-                            .tag(track.id)
-                            .onTapGesture(count: 2) {
-                                if let i = player.tracks.firstIndex(where: { $0.id == track.id }) {
-                                    player.play(index: i)
-                                }
-                            }
-                            .contextMenu {
-                                Button("Play") {
-                                    if let i = player.tracks.firstIndex(where: { $0.id == track.id }) {
-                                        player.play(index: i)
-                                    }
-                                }
-                                Button("Reveal in Finder") {
-                                    NSWorkspace.shared.activateFileViewerSelecting([track.url])
-                                }
-                                Divider()
-                                Button("Remove") {
-                                    if let i = player.tracks.firstIndex(where: { $0.id == track.id }) {
-                                        player.remove(at: IndexSet(integer: i))
-                                        selection.remove(track.id)
-                                    }
-                                }
-                            }
-                        }
-                        .onMove { from, to in
-                            NSLog("[Minpaw] onMove from=\(Array(from)) to=\(to)")
-                            player.moveTracks(fromOffsets: from, toOffset: to)
-                        }
+        Group {
+            if player.tracks.isEmpty {
+                emptyState
+            } else {
+                PlaylistTable(
+                    tracks: player.tracks,
+                    selection: $selection,
+                    currentTrackID: player.currentTrack?.id,
+                    onPlay: { row in player.play(index: row) },
+                    onMove: { from, to in player.moveTracks(fromOffsets: from, toOffset: to) },
+                    onReveal: { track in NSWorkspace.shared.activateFileViewerSelecting([track.url]) },
+                    onRemove: { row in
+                        guard row < player.tracks.count else { return }
+                        let id = player.tracks[row].id
+                        player.remove(at: IndexSet(integer: row))
+                        selection.remove(id)
                     }
-                    .listStyle(.plain)
-                    .scrollContentBackground(.hidden)
-                    .background(Win.lcdBg)
-                    .alternatingRowBackgrounds(.disabled)
-                    .environment(\.defaultMinListRowHeight, 18)
-                    .onChange(of: player.currentIndex) { _, new in
-                        if let i = new, i < player.tracks.count {
-                            withAnimation { proxy.scrollTo(player.tracks[i].id, anchor: .center) }
-                        }
-                    }
-                }
+                )
+                .background(Win.lcdBg)
             }
         }
     }
@@ -167,40 +129,3 @@ struct PlaylistView: View {
     }
 }
 
-struct TrackRow: View {
-    let index: Int
-    let track: Track
-    let isPlaying: Bool
-    let isSelected: Bool
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Text(String(format: "%d.", index + 1))
-                .frame(width: 24, alignment: .trailing)
-            Text(displayLine)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Text(durationText)
-        }
-        .font(.system(size: 10, weight: .bold, design: .monospaced))
-        .foregroundStyle(isPlaying ? Win.amber : (isSelected ? Color.white : Win.lcdGreen))
-        .shadow(color: (isPlaying ? Win.amber : Win.lcdGreen).opacity(isSelected ? 0 : 0.45), radius: 1)
-        .padding(.horizontal, 6)
-        .padding(.vertical, 1.5)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(isSelected ? Color(hex: 0x0A2F4D) : Color.clear)
-    }
-
-    private var displayLine: String {
-        if let artist = track.artist, !artist.isEmpty {
-            return "\(artist) - \(track.title)"
-        }
-        return track.title
-    }
-
-    private var durationText: String {
-        let s = Int(track.duration)
-        return String(format: "%d:%02d", s / 60, s % 60)
-    }
-}
