@@ -30,6 +30,8 @@ final class LibraryStore: ObservableObject {
 
     @Published var tracks: [Track] = []
     @Published var addedDates: [URL: Date] = [:]
+    @Published var playCount: [URL: Int] = [:]
+    @Published var lastPlayedAt: [URL: Date] = [:]
     @Published var searchText: String = ""
     @Published var selectedCategory: Category = .audio
     @Published var selectedArtist: String? = nil
@@ -37,8 +39,29 @@ final class LibraryStore: ObservableObject {
     @Published var indexing: Bool = false
     @Published var indexProgress: (loaded: Int, total: Int) = (0, 0)
 
+    private var playObserver: NSObjectProtocol?
+
     init() {
         load()
+        // Listen for plays from PlayerEngine and bump our counters.
+        playObserver = NotificationCenter.default.addObserver(
+            forName: .minpawTrackStartedPlaying,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let url = note.object as? URL else { return }
+            Task { @MainActor in self?.recordPlay(url: url) }
+        }
+    }
+
+    deinit {
+        if let playObserver { NotificationCenter.default.removeObserver(playObserver) }
+    }
+
+    func recordPlay(url: URL) {
+        playCount[url, default: 0] += 1
+        lastPlayedAt[url] = Date()
+        save()
     }
 
     // MARK: - Filtered views
@@ -51,9 +74,20 @@ final class LibraryStore: ObservableObject {
             return tracks.sorted {
                 (addedDates[$0.url] ?? .distantPast) > (addedDates[$1.url] ?? .distantPast)
             }
-        case .mostPlayed, .recentlyPlayed, .neverPlayed, .topRated:
-            // Play history / ratings not yet tracked. Surface the same
-            // catalog as Audio for now so the rows are not blank.
+        case .mostPlayed:
+            return tracks
+                .filter { (playCount[$0.url] ?? 0) > 0 }
+                .sorted { (playCount[$0.url] ?? 0) > (playCount[$1.url] ?? 0) }
+        case .recentlyPlayed:
+            return tracks
+                .filter { lastPlayedAt[$0.url] != nil }
+                .sorted {
+                    (lastPlayedAt[$0.url] ?? .distantPast) > (lastPlayedAt[$1.url] ?? .distantPast)
+                }
+        case .neverPlayed:
+            return tracks.filter { (playCount[$0.url] ?? 0) == 0 }
+        case .topRated:
+            // Ratings not yet implemented — surface everything for now.
             return tracks
         }
     }
@@ -119,6 +153,8 @@ final class LibraryStore: ObservableObject {
     func clear() {
         tracks.removeAll()
         addedDates.removeAll()
+        playCount.removeAll()
+        lastPlayedAt.removeAll()
         selectedArtist = nil
         selectedAlbum = nil
         save()
@@ -131,7 +167,11 @@ final class LibraryStore: ObservableObject {
         guard !ids.isEmpty else { return }
         let removedURLs = tracks.compactMap { ids.contains($0.id) ? $0.url : nil }
         tracks.removeAll { ids.contains($0.id) }
-        for url in removedURLs { addedDates.removeValue(forKey: url) }
+        for url in removedURLs {
+            addedDates.removeValue(forKey: url)
+            playCount.removeValue(forKey: url)
+            lastPlayedAt.removeValue(forKey: url)
+        }
         // If the active artist/album filter no longer matches anything,
         // reset it so the user is not staring at an empty pane.
         if let artist = selectedArtist, !tracks.contains(where: { $0.artist == artist }) {
@@ -204,6 +244,32 @@ final class LibraryStore: ObservableObject {
     private struct Persisted: Codable {
         var tracks: [Track]
         var addedDates: [String: Date]
+        var playCount: [String: Int]
+        var lastPlayedAt: [String: Date]
+
+        enum CodingKeys: String, CodingKey {
+            case tracks, addedDates, playCount, lastPlayedAt
+        }
+
+        init(tracks: [Track],
+             addedDates: [String: Date],
+             playCount: [String: Int],
+             lastPlayedAt: [String: Date]) {
+            self.tracks = tracks
+            self.addedDates = addedDates
+            self.playCount = playCount
+            self.lastPlayedAt = lastPlayedAt
+        }
+
+        // Custom decoder so adding new keys is non-breaking — older
+        // library.json files (pre play-history) still load cleanly.
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            tracks = try c.decode([Track].self, forKey: .tracks)
+            addedDates = try c.decodeIfPresent([String: Date].self, forKey: .addedDates) ?? [:]
+            playCount = try c.decodeIfPresent([String: Int].self, forKey: .playCount) ?? [:]
+            lastPlayedAt = try c.decodeIfPresent([String: Date].self, forKey: .lastPlayedAt) ?? [:]
+        }
     }
 
     private static let storeURL: URL = {
@@ -219,9 +285,12 @@ final class LibraryStore: ObservableObject {
     }()
 
     func save() {
-        let datesByString = Dictionary(uniqueKeysWithValues:
-            addedDates.map { ($0.key.absoluteString, $0.value) })
-        let persisted = Persisted(tracks: tracks, addedDates: datesByString)
+        let persisted = Persisted(
+            tracks: tracks,
+            addedDates: stringKeyed(addedDates),
+            playCount: stringKeyed(playCount),
+            lastPlayedAt: stringKeyed(lastPlayedAt)
+        )
         if let data = try? JSONEncoder().encode(persisted) {
             try? data.write(to: Self.storeURL)
         }
@@ -231,12 +300,20 @@ final class LibraryStore: ObservableObject {
         guard let data = try? Data(contentsOf: Self.storeURL),
               let persisted = try? JSONDecoder().decode(Persisted.self, from: data)
         else { return }
-        // Drop tracks whose files no longer exist on disk.
         tracks = persisted.tracks.filter { FileManager.default.fileExists(atPath: $0.url.path) }
-        let datesByURL = persisted.addedDates.compactMap { (key, value) -> (URL, Date)? in
+        addedDates = urlKeyed(persisted.addedDates)
+        playCount = urlKeyed(persisted.playCount)
+        lastPlayedAt = urlKeyed(persisted.lastPlayedAt)
+    }
+
+    private func stringKeyed<V>(_ dict: [URL: V]) -> [String: V] {
+        Dictionary(uniqueKeysWithValues: dict.map { ($0.key.absoluteString, $0.value) })
+    }
+
+    private func urlKeyed<V>(_ dict: [String: V]) -> [URL: V] {
+        Dictionary(uniqueKeysWithValues: dict.compactMap { (key, value) -> (URL, V)? in
             guard let url = URL(string: key) else { return nil }
             return (url, value)
-        }
-        addedDates = Dictionary(uniqueKeysWithValues: datesByURL)
+        })
     }
 }

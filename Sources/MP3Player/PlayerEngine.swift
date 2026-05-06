@@ -6,6 +6,13 @@ import MediaPlayer
 import CoreAudio
 import AudioToolbox
 
+extension Notification.Name {
+    /// Posted by PlayerEngine when a track transitions to playing
+    /// (user-initiated or auto-advance). `object` is the track's URL.
+    /// LibraryStore observes this to maintain play count + history.
+    static let minpawTrackStartedPlaying = Notification.Name("minpaw.trackStartedPlaying")
+}
+
 @MainActor
 final class PlayerEngine: ObservableObject {
     static let bandFrequencies: [Float] = [60, 170, 310, 600, 1000, 3000, 6000, 12000, 14000, 16000]
@@ -278,6 +285,12 @@ final class PlayerEngine: ObservableObject {
         guard index >= 0, index < tracks.count else { return }
         currentIndex = index
         loadCurrent(autoplay: true)
+        // Tell the library so it can bump play count / last-played
+        // for the underlying file (matched by URL).
+        NotificationCenter.default.post(
+            name: .minpawTrackStartedPlaying,
+            object: tracks[index].url
+        )
     }
 
     private func loadCurrent(autoplay: Bool) {

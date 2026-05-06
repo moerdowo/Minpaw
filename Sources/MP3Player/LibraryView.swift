@@ -43,10 +43,6 @@ struct LibraryView: View {
             ForEach(LibraryStore.Category.allCases) { cat in
                 sidebarRow(cat: cat)
             }
-            Spacer().frame(height: 6)
-            sidebarSectionHeader("PLAYLISTS")
-            sidebarStatic(label: "Bookmarks", icon: "bookmark.fill")
-            sidebarStatic(label: "History", icon: "clock.arrow.circlepath")
             Spacer()
         }
         .frame(width: 150)
@@ -93,17 +89,6 @@ struct LibraryView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-    }
-
-    private func sidebarStatic(label: String, icon: String) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: icon).font(.system(size: 9)).frame(width: 12)
-            Text(label).font(.system(size: 10, weight: .bold, design: .monospaced))
-            Spacer()
-        }
-        .foregroundStyle(Win.lcdGreenDim.opacity(0.7))
-        .padding(.horizontal, 14)
-        .padding(.vertical, 3)
     }
 
     // MARK: - Main area
@@ -281,20 +266,21 @@ struct LibraryView: View {
         .background(isSelected ? Color(hex: 0x0A2F4D) : Color.clear)
         .contentShape(Rectangle())
         .onTapGesture(count: 2) {
-            // Double-click: enqueue (selection or just this track) and play.
+            // Double-click adds to the playlist (no autoplay) — the
+            // user starts playback explicitly from the player window.
             let targets = contextTargets(clicked: track)
-            player.enqueue(targets, andPlay: true)
+            player.enqueue(targets, andPlay: false)
         }
         .onTapGesture {
             updateSelection(clicked: track)
         }
         .contextMenu {
             let targets = contextTargets(clicked: track)
-            Button("Play") {
-                player.enqueue(targets, andPlay: true)
-            }
             Button("Add to Playlist") {
                 player.enqueue(targets, andPlay: false)
+            }
+            Button("Add to Playlist & Play") {
+                player.enqueue(targets, andPlay: true)
             }
             Button("Reveal in Finder") {
                 NSWorkspace.shared.activateFileViewerSelecting(targets.map(\.url))
@@ -357,15 +343,6 @@ struct LibraryView: View {
 
     private var footer: some View {
         HStack(spacing: 6) {
-            Button("Play") {
-                let pool = store.visibleTracks
-                if !pool.isEmpty {
-                    player.enqueue(pool, andPlay: true)
-                }
-            }
-            .buttonStyle(SoftButton())
-            .disabled(store.visibleTracks.isEmpty)
-
             Button("Add Folder…") { store.indexFolder() }
                 .buttonStyle(SoftButton())
 
