@@ -32,11 +32,13 @@ struct PlaylistView: View {
                     onPlay: { row in player.play(index: row) },
                     onMove: { from, to in player.moveTracks(fromOffsets: from, toOffset: to) },
                     onReveal: { track in NSWorkspace.shared.activateFileViewerSelecting([track.url]) },
-                    onRemove: { row in
-                        guard row < player.tracks.count else { return }
-                        let id = player.tracks[row].id
-                        player.remove(at: IndexSet(integer: row))
-                        selection.remove(id)
+                    onRemoveRows: { indices in
+                        let removedIDs = indices.compactMap { idx -> UUID? in
+                            guard idx < player.tracks.count else { return nil }
+                            return player.tracks[idx].id
+                        }
+                        player.remove(at: indices)
+                        for id in removedIDs { selection.remove(id) }
                     }
                 )
                 .background(Win.lcdBg)
@@ -147,12 +149,16 @@ struct PlaylistView: View {
     private func openFiles() {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
-        panel.canChooseDirectories = false
+        panel.canChooseDirectories = true
         panel.canChooseFiles = true
-        var types: [UTType] = [.audio, .mp3, .mpeg4Audio, .wav, .aiff]
+        panel.message = "Choose audio files or folders to add."
+        var types: [UTType] = [.audio, .mp3, .mpeg4Audio, .wav, .aiff, .folder]
         if let flac = UTType("org.xiph.flac") { types.append(flac) }
         panel.allowedContentTypes = types
-        if panel.runModal() == .OK { player.addFiles(urls: panel.urls) }
+        if panel.runModal() == .OK {
+            let expanded = panel.urls.flatMap { AudioFileFinder.expand($0) }
+            if !expanded.isEmpty { player.addFiles(urls: expanded) }
+        }
     }
 
     private func removeSelected() {

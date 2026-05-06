@@ -32,6 +32,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         player?.saveState()
     }
+
+    /// Rewrites the macOS application menu to say "Minpaw" instead of
+    /// the executable name (which is "MP3Player" when running via
+    /// `swift run`, since SwiftPM keeps the module name). The bundled
+    /// Minpaw.app already has CFBundleName=Minpaw so this is a no-op
+    /// there.
+    func renameAppMenuIfNeeded() {
+        let target = "Minpaw"
+        let current = ProcessInfo.processInfo.processName
+        guard current != target,
+              let mainMenu = NSApp.mainMenu,
+              let appMenuItem = mainMenu.items.first,
+              let appMenu = appMenuItem.submenu else { return }
+        appMenuItem.title = target
+        appMenu.title = target
+        for item in appMenu.items {
+            if item.title.contains(current) {
+                item.title = item.title.replacingOccurrences(of: current, with: target)
+            }
+        }
+    }
 }
 
 @main
@@ -39,6 +60,7 @@ struct MP3PlayerApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var player = PlayerEngine()
     @AppStorage("showStatusBarMenulet") private var showStatusBarMenulet: Bool = true
+    @AppStorage("alwaysOnTop") private var alwaysOnTop: Bool = false
 
     var body: some Scene {
         Window("MINPAW", id: "main") {
@@ -53,19 +75,75 @@ struct MP3PlayerApp: App {
                         appDelegate.statusBarController = StatusBarController(player: player)
                     }
                     appDelegate.statusBarController?.setVisible(showStatusBarMenulet)
+                    applyAlwaysOnTop(alwaysOnTop)
+                    // SwiftUI installs its menu bar before `onAppear`,
+                    // so by now we can safely retitle the app menu.
+                    appDelegate.renameAppMenuIfNeeded()
                 }
                 .onChange(of: showStatusBarMenulet) { _, isVisible in
                     appDelegate.statusBarController?.setVisible(isVisible)
+                }
+                .onChange(of: alwaysOnTop) { _, on in
+                    applyAlwaysOnTop(on)
                 }
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
         .commands {
             CommandGroup(replacing: .newItem) {}
+            CommandGroup(replacing: .appInfo) {
+                Button("About Minpaw") { showAboutPanel() }
+            }
+            playlistFileCommands
             playbackCommands
             outputCommands
             viewCommands
         }
+
+        Window("Lyrics", id: "lyrics") {
+            LyricsView()
+                .environmentObject(player)
+                .frame(minWidth: 320, minHeight: 280)
+        }
+        .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 380, height: 420)
+    }
+
+    @CommandsBuilder
+    private var playlistFileCommands: some Commands {
+        CommandGroup(after: .newItem) {
+            Button("Open Playlist…") { PlaylistFiles.openPlaylist(into: player) }
+                .keyboardShortcut("o", modifiers: [.command])
+            Button("Save Playlist As…") { PlaylistFiles.savePlaylistAs(from: player) }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
+        }
+    }
+
+    private func applyAlwaysOnTop(_ on: Bool) {
+        for window in NSApp.windows {
+            window.level = on ? .floating : .normal
+        }
+    }
+
+    private func showAboutPanel() {
+        var options: [NSApplication.AboutPanelOptionKey: Any] = [
+            .applicationName: "Minpaw",
+            .credits: NSAttributedString(
+                string: "Native macOS MP3 player. Classic Winamp aesthetic.",
+                attributes: [.foregroundColor: NSColor.labelColor,
+                             .font: NSFont.systemFont(ofSize: 11)]
+            ),
+        ]
+        if let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String {
+            options[.applicationVersion] = version
+        } else {
+            options[.applicationVersion] = "dev"
+        }
+        if let icon = NSApp.applicationIconImage {
+            options[.applicationIcon] = icon
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.orderFrontStandardAboutPanel(options: options)
     }
 
     @CommandsBuilder
@@ -77,6 +155,10 @@ struct MP3PlayerApp: App {
         CommandGroup(after: .toolbar) {
             Toggle("Show Menu Bar Icon", isOn: $showStatusBarMenulet)
                 .keyboardShortcut("M", modifiers: [.command, .shift])
+            Toggle("Always on Top", isOn: $alwaysOnTop)
+                .keyboardShortcut("T", modifiers: [.command, .shift])
+            Divider()
+            ShowLyricsCommand()
         }
     }
 
@@ -127,6 +209,14 @@ struct MP3PlayerApp: App {
                 }
             }
         }
+    }
+}
+
+private struct ShowLyricsCommand: View {
+    @Environment(\.openWindow) private var openWindow
+    var body: some View {
+        Button("Show Lyrics") { openWindow(id: "lyrics") }
+            .keyboardShortcut("L", modifiers: [.command])
     }
 }
 

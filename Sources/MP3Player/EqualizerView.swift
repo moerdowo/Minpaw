@@ -3,6 +3,7 @@ import SwiftUI
 struct EqualizerView: View {
     @EnvironmentObject var player: PlayerEngine
     @State private var auto = false
+    @State private var savePresetSheet = false
 
     var body: some View {
         WinampPanel(title: "MINPAW EQUALIZER") {
@@ -32,10 +33,27 @@ struct EqualizerView: View {
                 .foregroundStyle(Win.lcdGreenDim)
             Spacer()
             Menu {
-                ForEach(EQPreset.presets) { preset in
-                    Button(preset.name) { player.applyPreset(preset) }
+                Section("Built-in") {
+                    ForEach(EQPreset.presets) { preset in
+                        Button(preset.name) { player.applyPreset(preset) }
+                    }
+                }
+                if !player.customEQPresets.isEmpty {
+                    Section("Saved") {
+                        ForEach(player.customEQPresets) { preset in
+                            Button(preset.name) { player.applyPreset(preset) }
+                        }
+                    }
+                    Section("Delete saved preset") {
+                        ForEach(player.customEQPresets) { preset in
+                            Button("Delete: \(preset.name)", role: .destructive) {
+                                player.deleteCustomEQPreset(preset)
+                            }
+                        }
+                    }
                 }
                 Divider()
+                Button("Save current as…") { savePresetSheet = true }
                 Button("Reset") { player.resetEQ() }
             } label: {
                 ZStack {
@@ -51,6 +69,11 @@ struct EqualizerView: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
+            .sheet(isPresented: $savePresetSheet) {
+                SavePresetSheet { name in
+                    player.saveCurrentAsPreset(named: name)
+                }
+            }
         }
     }
 
@@ -79,6 +102,35 @@ struct EqualizerView: View {
         }
         .padding(.vertical, 2)
         .opacity(player.eqEnabled ? 1.0 : 0.55)
+    }
+}
+
+private struct SavePresetSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var name: String = ""
+    let onSave: (String) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Save EQ preset")
+                .font(.headline)
+            TextField("Name", text: $name)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 240)
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Save") {
+                    onSave(name)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 280)
     }
 }
 

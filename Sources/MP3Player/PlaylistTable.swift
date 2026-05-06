@@ -13,7 +13,10 @@ struct PlaylistTable: NSViewRepresentable {
     let onPlay: (Int) -> Void
     let onMove: (IndexSet, Int) -> Void
     let onReveal: (Track) -> Void
-    let onRemove: (Int) -> Void
+    /// Called with the user-targeted set: if the right-clicked row is
+    /// part of the current selection, the entire selection; otherwise
+    /// just the right-clicked row.
+    let onRemoveRows: (IndexSet) -> Void
 
     fileprivate static let dragType = NSPasteboard.PasteboardType("app.minpaw.row-index")
 
@@ -33,7 +36,7 @@ struct PlaylistTable: NSViewRepresentable {
         tableView.backgroundColor = .clear
         tableView.gridStyleMask = []
         tableView.intercellSpacing = NSSize(width: 0, height: 0)
-        tableView.allowsMultipleSelection = false
+        tableView.allowsMultipleSelection = true
         tableView.allowsEmptySelection = true
         tableView.selectionHighlightStyle = .none
         tableView.rowHeight = 16
@@ -179,8 +182,16 @@ struct PlaylistTable: NSViewRepresentable {
         }
 
         @objc func menuRemove() {
-            guard let row = tableView?.clickedRow, row >= 0 else { return }
-            DispatchQueue.main.async { self.parent.onRemove(row) }
+            guard let tableView else { return }
+            let clicked = tableView.clickedRow
+            var indices = tableView.selectedRowIndexes
+            // Mac convention: right-click on an unselected row acts on
+            // just that row, otherwise on the whole selection.
+            if clicked >= 0 && !indices.contains(clicked) {
+                indices = IndexSet(integer: clicked)
+            }
+            guard !indices.isEmpty else { return }
+            DispatchQueue.main.async { self.parent.onRemoveRows(indices) }
         }
 
         // MARK: helpers

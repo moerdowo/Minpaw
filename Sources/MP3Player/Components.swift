@@ -379,6 +379,10 @@ private struct ChromeButton: View {
                 .onChanged { _ in down = true }
                 .onEnded { _ in down = false }
         )
+        // If the window minimizes mid-gesture, the DragGesture's
+        // onEnded never fires and the bevel sticks "pressed". Reset
+        // when the view re-appears.
+        .onAppear { down = false }
     }
 }
 

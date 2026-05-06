@@ -43,6 +43,7 @@ final class PlayerEngine: ObservableObject {
     @Published var sleepTimerEnd: Date? = nil
     @Published var availableOutputDevices: [OutputDevice] = []
     @Published var currentOutputDeviceID: AudioDeviceID? = nil
+    @Published private(set) var customEQPresets: [EQPreset] = []
 
     private let engine = AVAudioEngine()
     private let playerNode = AVAudioPlayerNode()
@@ -91,6 +92,7 @@ final class PlayerEngine: ObservableObject {
         startTicker()
         refreshOutputDevices()
         configureRemoteCommands()
+        loadCustomEQPresets()
         restoreState()
     }
 
@@ -263,6 +265,13 @@ final class PlayerEngine: ObservableObject {
             seekFrame = 0
             currentTime = 0
             playerNode.stop()
+            // Replay Gain — apply per-track gain at the player node so the
+            // user's main volume slider on the mixer is unaffected.
+            if let db = track.replayGainDB {
+                playerNode.volume = pow(10, db / 20)
+            } else {
+                playerNode.volume = 1
+            }
             scheduleAndArm(file: file, startingFrame: 0)
             if autoplay {
                 if !engine.isRunning { try? engine.start() }
@@ -387,6 +396,40 @@ final class PlayerEngine: ObservableObject {
     func resetEQ() {
         applyPreset(EQPreset.presets[0])
         preampGain = 0
+    }
+
+    /// Captures the current EQ state as a named user preset and persists
+    /// it to UserDefaults. Replaces an existing preset with the same name.
+    func saveCurrentAsPreset(named name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let preset = EQPreset(name: trimmed,
+                              preamp: preampGain,
+                              bands: bandGains)
+        customEQPresets.removeAll { $0.name.caseInsensitiveCompare(trimmed) == .orderedSame }
+        customEQPresets.append(preset)
+        customEQPresets.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        saveCustomEQPresets()
+    }
+
+    func deleteCustomEQPreset(_ preset: EQPreset) {
+        customEQPresets.removeAll { $0.id == preset.id }
+        saveCustomEQPresets()
+    }
+
+    private static let customEQKey = "minpaw.customEQPresets.v1"
+
+    private func saveCustomEQPresets() {
+        if let data = try? JSONEncoder().encode(customEQPresets) {
+            UserDefaults.standard.set(data, forKey: Self.customEQKey)
+        }
+    }
+
+    private func loadCustomEQPresets() {
+        guard let data = UserDefaults.standard.data(forKey: Self.customEQKey),
+              let presets = try? JSONDecoder().decode([EQPreset].self, from: data)
+        else { return }
+        customEQPresets = presets
     }
 
     // MARK: - Sleep timer
