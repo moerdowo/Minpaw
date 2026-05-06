@@ -339,6 +339,29 @@ private final class DraggableNSView: NSView {
 
 // MARK: - Custom title-bar window controls
 
+/// Compact bevelled button style used for short text actions in panel
+/// chrome (Add Folder, Clear, etc.). Matches the plastic look without
+/// requiring an explicit width.
+struct SoftButton: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                LinearGradient(
+                    colors: configuration.isPressed
+                        ? [Win.faceDark, Win.face]
+                        : [Win.faceLight, Win.face],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+            .foregroundStyle(.white.opacity(0.9))
+            .overlay(Bevel(pressed: configuration.isPressed))
+    }
+}
+
 struct TitleControls: View {
     var body: some View {
         HStack(spacing: 1) {

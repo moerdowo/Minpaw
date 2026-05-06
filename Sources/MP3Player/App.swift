@@ -88,6 +88,15 @@ struct MP3PlayerApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 380, height: 420)
+
+        Window("Library", id: "library") {
+            LibraryView()
+                .environmentObject(player)
+                .frame(minWidth: 720, minHeight: 480)
+                .focusEffectDisabled()
+        }
+        .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 900, height: 560)
     }
 
     @CommandsBuilder
@@ -139,6 +148,7 @@ struct MP3PlayerApp: App {
             Toggle("Always on Top", isOn: $alwaysOnTop)
                 .keyboardShortcut("T", modifiers: [.command, .shift])
             Divider()
+            ShowLibraryCommand()
             ShowLyricsCommand()
         }
     }
@@ -198,6 +208,14 @@ private struct ShowLyricsCommand: View {
     var body: some View {
         Button("Show Lyrics") { openWindow(id: "lyrics") }
             .keyboardShortcut("L", modifiers: [.command])
+    }
+}
+
+private struct ShowLibraryCommand: View {
+    @Environment(\.openWindow) private var openWindow
+    var body: some View {
+        Button("Show Library") { openWindow(id: "library") }
+            .keyboardShortcut("B", modifiers: [.command, .shift])
     }
 }
 

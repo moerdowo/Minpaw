@@ -216,6 +216,31 @@ final class PlayerEngine: ObservableObject {
         }
     }
 
+    /// Appends already-loaded `Track` values to the playlist, optionally
+    /// starting playback at the first newly-added track. Each track is
+    /// re-stamped with a fresh UUID so it is independent from the
+    /// source (the library, for example) — removing it from the
+    /// playlist later does not affect the original.
+    func enqueue(_ incoming: [Track], andPlay: Bool = false) {
+        guard !incoming.isEmpty else { return }
+        let copies: [Track] = incoming.map { src in
+            Track(url: src.url,
+                  title: src.title,
+                  artist: src.artist,
+                  album: src.album,
+                  duration: src.duration,
+                  artwork: src.artwork,
+                  replayGainDB: src.replayGainDB,
+                  lyrics: src.lyrics)
+        }
+        let firstNewIndex = tracks.count
+        tracks.append(contentsOf: copies)
+        saveState()
+        if andPlay {
+            play(index: firstNewIndex)
+        }
+    }
+
     func moveTracks(fromOffsets source: IndexSet, toOffset destination: Int) {
         let nowPlayingID = currentTrack?.id
         tracks.move(fromOffsets: source, toOffset: destination)
