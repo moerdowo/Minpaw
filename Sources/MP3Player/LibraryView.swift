@@ -9,6 +9,7 @@ struct LibraryView: View {
     @EnvironmentObject var player: PlayerEngine
     @State private var trackSelection: Set<UUID> = []
     @State private var selectionAnchor: UUID? = nil
+    @State private var editingTrack: Track? = nil
 
     var body: some View {
         ZStack {
@@ -33,6 +34,14 @@ struct LibraryView: View {
         .background(LibraryWindowChrome())
         .preferredColorScheme(.dark)
         .focusEffectDisabled()
+        .sheet(item: $editingTrack) { track in
+            EditMetadataSheet(track: track) { newTitle, newArtist, newAlbum in
+                store.updateTrack(id: track.id,
+                                  title: newTitle,
+                                  artist: newArtist,
+                                  album: newAlbum)
+            }
+        }
     }
 
     // MARK: - Sidebar
@@ -246,11 +255,11 @@ struct LibraryView: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            Text(track.artist ?? "—")
+            Text(store.displayArtist(track))
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(width: 130, alignment: .leading)
-            Text(track.album ?? "—")
+            Text(store.displayAlbum(track))
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(width: 140, alignment: .leading)
@@ -284,6 +293,12 @@ struct LibraryView: View {
             }
             Button("Reveal in Finder") {
                 NSWorkspace.shared.activateFileViewerSelecting(targets.map(\.url))
+            }
+            Divider()
+            Button("Edit Metadata…") {
+                // Always edit the right-clicked track, regardless of
+                // multi-selection — keeps the dialog unambiguous.
+                editingTrack = track
             }
             Divider()
             Button("Remove from Library", role: .destructive) {
@@ -380,6 +395,80 @@ struct LibraryView: View {
             : String(format: "%d:%02d", m, s)
         return "\(count) item\(count == 1 ? "" : "s") · [\(durStr)] · [\(String(format: "%.2f MB", mb))]"
     }
+}
+
+// MARK: - Edit Metadata sheet
+
+private struct EditMetadataSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let track: Track
+    let onSave: (String, String?, String?) -> Void
+
+    @State private var title: String
+    @State private var artist: String
+    @State private var album: String
+
+    init(track: Track, onSave: @escaping (String, String?, String?) -> Void) {
+        self.track = track
+        self.onSave = onSave
+        _title = State(initialValue: track.title)
+        _artist = State(initialValue: track.artist ?? "")
+        _album = State(initialValue: track.album ?? "")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Edit Metadata")
+                .font(.headline)
+            VStack(alignment: .leading, spacing: 8) {
+                row(label: "Title",  text: $title,  required: true)
+                row(label: "Artist", text: $artist, required: false)
+                row(label: "Album",  text: $album,  required: false)
+            }
+            Text("Edits apply to the library only — the file's tags are not rewritten.")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Save") { commit() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(trimmed(title).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 420)
+    }
+
+    private func row(label: String, text: Binding<String>, required: Bool) -> some View {
+        HStack(spacing: 10) {
+            Text(label + (required ? " *" : ""))
+                .frame(width: 60, alignment: .trailing)
+                .foregroundStyle(.secondary)
+            TextField(label, text: text)
+                .textFieldStyle(.roundedBorder)
+        }
+    }
+
+    private func commit() {
+        let cleanTitle = trimmed(title)
+        guard !cleanTitle.isEmpty else { return }
+        onSave(
+            cleanTitle,
+            trimmed(artist).nilIfEmpty,
+            trimmed(album).nilIfEmpty
+        )
+        dismiss()
+    }
+
+    private func trimmed(_ s: String) -> String {
+        s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }
 
 // MARK: - Window chrome

@@ -1,6 +1,14 @@
 import Foundation
 import AppKit
 
+/// Strings used when a track's metadata is missing. Shown in the
+/// artist/album lists, on the track row, and used as the bucket name
+/// when filtering by artist/album.
+enum LibraryDefaults {
+    static let unknownArtist = "Various Artists"
+    static let unknownAlbum = "Unknown Album"
+}
+
 /// In-memory + on-disk index of audio tracks the user has imported into
 /// the library. Walks the user-picked folders, reads metadata via
 /// `Track.load`, persists to `~/Library/Application Support/Minpaw/library.json`.
@@ -58,6 +66,27 @@ final class LibraryStore: ObservableObject {
         if let playObserver { NotificationCenter.default.removeObserver(playObserver) }
     }
 
+    /// Updates the library's view of a track's title/artist/album.
+    /// Only writes to the library index — the file's on-disk metadata
+    /// is left untouched (re-indexing the file would restore the
+    /// original tags).
+    func updateTrack(id: UUID, title: String, artist: String?, album: String?) {
+        guard let idx = tracks.firstIndex(where: { $0.id == id }) else { return }
+        tracks[idx].title = title
+        tracks[idx].artist = artist
+        tracks[idx].album = album
+        // If the active artist/album filter no longer matches the
+        // edited track's bucket, drop the filter so it doesn't vanish
+        // out from under the user.
+        if let selected = selectedArtist, selected != displayArtist(tracks[idx]) {
+            selectedArtist = nil
+        }
+        if let selected = selectedAlbum, selected != displayAlbum(tracks[idx]) {
+            selectedAlbum = nil
+        }
+        save()
+    }
+
     func recordPlay(url: URL) {
         playCount[url, default: 0] += 1
         lastPlayedAt[url] = Date()
@@ -104,14 +133,27 @@ final class LibraryStore: ObservableObject {
     }
 
     var artists: [String] {
-        let names = Set(filteredBySearch.compactMap { trim($0.artist) })
+        var names = Set<String>()
+        for t in filteredBySearch {
+            names.insert(displayArtist(t))
+        }
         return names.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
 
     var albums: [String] {
-        let pool = filteredBySearch.filter { matchesArtist($0) }
-        let names = Set(pool.compactMap { trim($0.album) })
+        var names = Set<String>()
+        for t in filteredBySearch where matchesArtist(t) {
+            names.insert(displayAlbum(t))
+        }
         return names.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
+    func displayArtist(_ track: Track) -> String {
+        trim(track.artist) ?? LibraryDefaults.unknownArtist
+    }
+
+    func displayAlbum(_ track: Track) -> String {
+        trim(track.album) ?? LibraryDefaults.unknownAlbum
     }
 
     var visibleTracks: [Track] {
@@ -216,12 +258,12 @@ final class LibraryStore: ObservableObject {
 
     private func matchesArtist(_ t: Track) -> Bool {
         guard let selected = selectedArtist else { return true }
-        return trim(t.artist) == selected
+        return displayArtist(t) == selected
     }
 
     private func matchesAlbum(_ t: Track) -> Bool {
         guard let selected = selectedAlbum else { return true }
-        return trim(t.album) == selected
+        return displayAlbum(t) == selected
     }
 
     private func trim(_ value: String?) -> String? {
