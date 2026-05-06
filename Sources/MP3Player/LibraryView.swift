@@ -364,6 +364,11 @@ struct LibraryView: View {
             Button("Add Folder…") { store.indexFolder() }
                 .buttonStyle(SoftButton())
 
+            Button("Rescan") { store.rescan() }
+                .buttonStyle(SoftButton())
+                .disabled(store.sourceFolders.isEmpty || store.indexing)
+                .help("Re-walk added folders to pick up new files and prune missing ones.")
+
             Button("Clear Library") { store.clear() }
                 .buttonStyle(SoftButton())
                 .disabled(store.tracks.isEmpty)

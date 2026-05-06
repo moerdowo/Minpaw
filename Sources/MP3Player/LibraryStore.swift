@@ -40,6 +40,7 @@ final class LibraryStore: ObservableObject {
     @Published var addedDates: [URL: Date] = [:]
     @Published var playCount: [URL: Int] = [:]
     @Published var lastPlayedAt: [URL: Date] = [:]
+    @Published var sourceFolders: [URL] = []
     @Published var searchText: String = ""
     @Published var selectedCategory: Category = .audio
     @Published var selectedArtist: String? = nil
@@ -187,9 +188,25 @@ final class LibraryStore: ObservableObject {
         panel.message = "Choose a folder to add to your library."
         panel.prompt = "Add"
         guard panel.runModal() == .OK, let folder = panel.url else { return }
+        if !sourceFolders.contains(folder) {
+            sourceFolders.append(folder)
+        }
         let urls = AudioFileFinder.expand(folder)
-        guard !urls.isEmpty else { return }
+        guard !urls.isEmpty else {
+            save()
+            return
+        }
         Task { await indexURLs(urls) }
+    }
+
+    /// Re-walks every folder the user has added. Picks up new audio
+    /// files, drops tracks whose files have disappeared from disk, and
+    /// preserves play history / metadata edits for files that still
+    /// exist.
+    func rescan() {
+        guard !sourceFolders.isEmpty else { return }
+        let folders = sourceFolders
+        Task { await rescanFolders(folders) }
     }
 
     func clear() {
@@ -197,6 +214,7 @@ final class LibraryStore: ObservableObject {
         addedDates.removeAll()
         playCount.removeAll()
         lastPlayedAt.removeAll()
+        sourceFolders.removeAll()
         selectedArtist = nil
         selectedAlbum = nil
         save()
@@ -254,6 +272,70 @@ final class LibraryStore: ObservableObject {
         save()
     }
 
+    private func rescanFolders(_ folders: [URL]) async {
+        indexing = true
+        indexProgress = (0, 0)
+
+        // Walk folders off the main actor — directory enumeration on a
+        // large library can stall the UI.
+        let discovered: [URL] = await Task.detached(priority: .userInitiated) {
+            var seen = Set<URL>()
+            var ordered: [URL] = []
+            for folder in folders {
+                for url in AudioFileFinder.expand(folder) where seen.insert(url).inserted {
+                    ordered.append(url)
+                }
+            }
+            return ordered
+        }.value
+
+        let discoveredSet = Set(discovered)
+
+        // Drop tracks under a scanned folder whose file is gone. Tracks
+        // outside every scanned folder are left alone — they may have
+        // been added some other way.
+        let scannedRoots = folders.map { $0.standardizedFileURL.path }
+        let removed = tracks.filter { track in
+            let path = track.url.standardizedFileURL.path
+            let underScannedRoot = scannedRoots.contains { root in
+                path == root || path.hasPrefix(root.hasSuffix("/") ? root : root + "/")
+            }
+            return underScannedRoot && !discoveredSet.contains(track.url)
+        }
+        if !removed.isEmpty {
+            let removedURLs = Set(removed.map(\.url))
+            tracks.removeAll { removedURLs.contains($0.url) }
+            for url in removedURLs {
+                addedDates.removeValue(forKey: url)
+                playCount.removeValue(forKey: url)
+                lastPlayedAt.removeValue(forKey: url)
+            }
+        }
+
+        let existing = Set(tracks.map(\.url))
+        let newURLs = discovered.filter { !existing.contains($0) }
+        let now = Date()
+        indexProgress = (0, newURLs.count)
+
+        for (i, url) in newURLs.enumerated() {
+            if let track = await Track.load(from: url) {
+                tracks.append(track)
+                addedDates[url] = now
+            }
+            indexProgress = (i + 1, newURLs.count)
+        }
+
+        if let artist = selectedArtist, !tracks.contains(where: { displayArtist($0) == artist }) {
+            selectedArtist = nil
+        }
+        if let album = selectedAlbum, !tracks.contains(where: { displayAlbum($0) == album }) {
+            selectedAlbum = nil
+        }
+
+        indexing = false
+        save()
+    }
+
     // MARK: - Helpers
 
     private func matchesArtist(_ t: Track) -> Bool {
@@ -288,19 +370,22 @@ final class LibraryStore: ObservableObject {
         var addedDates: [String: Date]
         var playCount: [String: Int]
         var lastPlayedAt: [String: Date]
+        var sourceFolders: [String]
 
         enum CodingKeys: String, CodingKey {
-            case tracks, addedDates, playCount, lastPlayedAt
+            case tracks, addedDates, playCount, lastPlayedAt, sourceFolders
         }
 
         init(tracks: [Track],
              addedDates: [String: Date],
              playCount: [String: Int],
-             lastPlayedAt: [String: Date]) {
+             lastPlayedAt: [String: Date],
+             sourceFolders: [String]) {
             self.tracks = tracks
             self.addedDates = addedDates
             self.playCount = playCount
             self.lastPlayedAt = lastPlayedAt
+            self.sourceFolders = sourceFolders
         }
 
         // Custom decoder so adding new keys is non-breaking — older
@@ -311,6 +396,7 @@ final class LibraryStore: ObservableObject {
             addedDates = try c.decodeIfPresent([String: Date].self, forKey: .addedDates) ?? [:]
             playCount = try c.decodeIfPresent([String: Int].self, forKey: .playCount) ?? [:]
             lastPlayedAt = try c.decodeIfPresent([String: Date].self, forKey: .lastPlayedAt) ?? [:]
+            sourceFolders = try c.decodeIfPresent([String].self, forKey: .sourceFolders) ?? []
         }
     }
 
@@ -331,7 +417,8 @@ final class LibraryStore: ObservableObject {
             tracks: tracks,
             addedDates: stringKeyed(addedDates),
             playCount: stringKeyed(playCount),
-            lastPlayedAt: stringKeyed(lastPlayedAt)
+            lastPlayedAt: stringKeyed(lastPlayedAt),
+            sourceFolders: sourceFolders.map { $0.absoluteString }
         )
         if let data = try? JSONEncoder().encode(persisted) {
             try? data.write(to: Self.storeURL)
@@ -346,6 +433,7 @@ final class LibraryStore: ObservableObject {
         addedDates = urlKeyed(persisted.addedDates)
         playCount = urlKeyed(persisted.playCount)
         lastPlayedAt = urlKeyed(persisted.lastPlayedAt)
+        sourceFolders = persisted.sourceFolders.compactMap { URL(string: $0) }
     }
 
     private func stringKeyed<V>(_ dict: [URL: V]) -> [String: V] {
