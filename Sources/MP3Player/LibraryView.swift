@@ -36,6 +36,9 @@ struct LibraryView: View {
         .focusEffectDisabled()
         .sheet(item: $editingTrack) { track in
             EditMetadataSheet(track: track) { newTitle, newArtist, newAlbum in
+                // After a successful file-tag write the sheet calls
+                // back with the values that were written. Reflect them
+                // in the library index too.
                 store.updateTrack(id: track.id,
                                   title: newTitle,
                                   artist: newArtist,
@@ -407,6 +410,8 @@ private struct EditMetadataSheet: View {
     @State private var title: String
     @State private var artist: String
     @State private var album: String
+    @State private var saving: Bool = false
+    @State private var errorMessage: String? = nil
 
     init(track: Track, onSave: @escaping (String, String?, String?) -> Void) {
         self.track = track
@@ -425,16 +430,24 @@ private struct EditMetadataSheet: View {
                 row(label: "Artist", text: $artist, required: false)
                 row(label: "Album",  text: $album,  required: false)
             }
-            Text("Edits apply to the library only — the file's tags are not rewritten.")
+            Text("Saves write to both the file's tags and the library.")
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.red)
+                    .lineLimit(3)
+            }
             HStack {
+                if saving { ProgressView().controlSize(.small) }
                 Spacer()
                 Button("Cancel") { dismiss() }
                     .keyboardShortcut(.cancelAction)
-                Button("Save") { commit() }
+                    .disabled(saving)
+                Button(saving ? "Saving…" : "Save") { commit() }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(trimmed(title).isEmpty)
+                    .disabled(saving || trimmed(title).isEmpty)
             }
         }
         .padding(20)
@@ -448,18 +461,39 @@ private struct EditMetadataSheet: View {
                 .foregroundStyle(.secondary)
             TextField(label, text: text)
                 .textFieldStyle(.roundedBorder)
+                .disabled(saving)
         }
     }
 
     private func commit() {
         let cleanTitle = trimmed(title)
         guard !cleanTitle.isEmpty else { return }
-        onSave(
-            cleanTitle,
-            trimmed(artist).nilIfEmpty,
-            trimmed(album).nilIfEmpty
-        )
-        dismiss()
+        let cleanArtist = trimmed(artist).nilIfEmpty
+        let cleanAlbum = trimmed(album).nilIfEmpty
+
+        saving = true
+        errorMessage = nil
+
+        Task {
+            do {
+                try await TrackTagWriter.write(
+                    url: track.url,
+                    title: cleanTitle,
+                    artist: cleanArtist,
+                    album: cleanAlbum
+                )
+                await MainActor.run {
+                    onSave(cleanTitle, cleanArtist, cleanAlbum)
+                    saving = false
+                    dismiss()
+                }
+            } catch {
+                await MainActor.run {
+                    errorMessage = error.localizedDescription
+                    saving = false
+                }
+            }
+        }
     }
 
     private func trimmed(_ s: String) -> String {
