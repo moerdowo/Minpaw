@@ -2,6 +2,9 @@ import Foundation
 import AVFoundation
 import Combine
 import AppKit
+import MediaPlayer
+import CoreAudio
+import AudioToolbox
 
 @MainActor
 final class PlayerEngine: ObservableObject {
@@ -37,6 +40,9 @@ final class PlayerEngine: ObservableObject {
     }
     @Published var bandGains: [Float]
     @Published var spectrum: [Float] = Array(repeating: 0, count: PlayerEngine.spectrumBandCount)
+    @Published var sleepTimerEnd: Date? = nil
+    @Published var availableOutputDevices: [OutputDevice] = []
+    @Published var currentOutputDeviceID: AudioDeviceID? = nil
 
     private let engine = AVAudioEngine()
     private let playerNode = AVAudioPlayerNode()
@@ -45,6 +51,9 @@ final class PlayerEngine: ObservableObject {
     private var seekFrame: AVAudioFramePosition = 0
     private var fileSampleRate: Double = 44100
     private var ticker: Timer?
+    private var sleepTimer: Timer?
+    private var nowPlayingThrottle: Date = .distantPast
+    private var hasRestoredState: Bool = false
     // Bumped every time we schedule (or invalidate) a buffer. The
     // completion handler captures the value at schedule time and only
     // fires `handleEnd` if the value still matches — so seeks, stops,
@@ -80,6 +89,9 @@ final class PlayerEngine: ObservableObject {
 
         installTap()
         startTicker()
+        refreshOutputDevices()
+        configureRemoteCommands()
+        restoreState()
     }
 
     // MARK: - Spectrum tap
@@ -94,30 +106,10 @@ final class PlayerEngine: ObservableObject {
     }
 
     nonisolated private func processSpectrum(buffer: AVAudioPCMBuffer) {
-        guard let channelData = buffer.floatChannelData else { return }
-        let frames = Int(buffer.frameLength)
-        guard frames > 0 else { return }
-        let channelCount = Int(buffer.format.channelCount)
-        let bandCount = 20
-        var bands = [Float](repeating: 0, count: bandCount)
-        let chunk = max(1, frames / bandCount)
-        for b in 0..<bandCount {
-            let start = b * chunk
-            let end = min(start + chunk, frames)
-            var sum: Float = 0
-            var count: Int = 0
-            for f in start..<end {
-                for c in 0..<channelCount {
-                    let v = channelData[c][f]
-                    sum += v * v
-                    count += 1
-                }
-            }
-            let rms = sqrtf(sum / Float(max(count, 1)))
-            bands[b] = min(1, rms * 5)
-        }
+        let bands = sharedFFTAnalyzer.process(buffer: buffer,
+                                              bandCount: PlayerEngine.spectrumBandCount)
         Task { @MainActor [bands] in
-            for i in 0..<self.spectrum.count {
+            for i in 0..<min(self.spectrum.count, bands.count) {
                 let target = bands[i]
                 let cur = self.spectrum[i]
                 self.spectrum[i] = max(target, cur * 0.78)
@@ -141,6 +133,7 @@ final class PlayerEngine: ObservableObject {
         let played = Double(playerTime.sampleTime) / playerTime.sampleRate
         let absolute = Double(seekFrame) / fileSampleRate + played
         currentTime = max(0, min(duration, absolute))
+        updateNowPlayingTimeIfNeeded()
         // End-of-track is detected via the schedule completion handler,
         // not from time tracking — playerTime stops updating once the
         // buffer is consumed, so a tick-based guard would never fire.
@@ -216,6 +209,7 @@ final class PlayerEngine: ObservableObject {
             }
             await MainActor.run {
                 self.tracks.append(contentsOf: loaded)
+                self.saveState()
             }
         }
     }
@@ -226,6 +220,7 @@ final class PlayerEngine: ObservableObject {
         if let id = nowPlayingID {
             currentIndex = tracks.firstIndex(where: { $0.id == id })
         }
+        saveState()
     }
 
     func remove(at indices: IndexSet) {
@@ -238,6 +233,7 @@ final class PlayerEngine: ObservableObject {
             let removedBefore = indices.filter { $0 < cur }.count
             currentIndex = cur - removedBefore
         }
+        saveState()
     }
 
     func clear() {
@@ -246,6 +242,7 @@ final class PlayerEngine: ObservableObject {
         currentIndex = nil
         duration = 0
         currentTime = 0
+        saveState()
     }
 
     // MARK: - Playback
@@ -274,6 +271,8 @@ final class PlayerEngine: ObservableObject {
             } else {
                 isPlaying = false
             }
+            updateNowPlayingInfo()
+            saveState()
         } catch {
             NSLog("Failed to load \(track.url): \(error)")
         }
@@ -292,6 +291,7 @@ final class PlayerEngine: ObservableObject {
             playerNode.play()
             isPlaying = true
         }
+        updateNowPlayingInfo()
     }
 
     func play() {
@@ -302,11 +302,14 @@ final class PlayerEngine: ObservableObject {
         if !engine.isRunning { try? engine.start() }
         playerNode.play()
         isPlaying = true
+        updateNowPlayingInfo()
     }
 
     func pause() {
         playerNode.pause()
         isPlaying = false
+        updateNowPlayingInfo()
+        saveState()
     }
 
     func stop() {
@@ -321,6 +324,8 @@ final class PlayerEngine: ObservableObject {
             audioFile = file
             playerNode.scheduleFile(file, at: nil, completionHandler: nil)
         }
+        updateNowPlayingInfo()
+        saveState()
     }
 
     func next() {
@@ -383,4 +388,196 @@ final class PlayerEngine: ObservableObject {
         applyPreset(EQPreset.presets[0])
         preampGain = 0
     }
+
+    // MARK: - Sleep timer
+
+    /// Schedules a sleep timer that pauses playback after `minutes`.
+    /// Pass `nil` to cancel.
+    func setSleepTimer(minutes: Int?) {
+        sleepTimer?.invalidate()
+        sleepTimer = nil
+        guard let minutes, minutes > 0 else {
+            sleepTimerEnd = nil
+            return
+        }
+        let interval = TimeInterval(minutes * 60)
+        sleepTimerEnd = Date().addingTimeInterval(interval)
+        sleepTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                self?.pause()
+                self?.sleepTimerEnd = nil
+            }
+        }
+    }
+
+    // MARK: - Persistence
+
+    private struct PersistedState: Codable {
+        var tracks: [Track]
+        var currentIndex: Int?
+        var currentTime: TimeInterval
+        var volume: Float
+        var shuffle: Bool
+        var repeatMode: String
+        var preampGain: Float
+        var bandGains: [Float]
+        var eqEnabled: Bool
+    }
+
+    private static let stateKey = "minpaw.persistedState.v1"
+
+    func saveState() {
+        let state = PersistedState(
+            tracks: tracks,
+            currentIndex: currentIndex,
+            currentTime: currentTime,
+            volume: volume,
+            shuffle: shuffle,
+            repeatMode: repeatMode.rawValue,
+            preampGain: preampGain,
+            bandGains: bandGains,
+            eqEnabled: eqEnabled
+        )
+        if let data = try? JSONEncoder().encode(state) {
+            UserDefaults.standard.set(data, forKey: Self.stateKey)
+        }
+    }
+
+    private func restoreState() {
+        guard !hasRestoredState else { return }
+        hasRestoredState = true
+        guard let data = UserDefaults.standard.data(forKey: Self.stateKey),
+              let state = try? JSONDecoder().decode(PersistedState.self, from: data)
+        else { return }
+
+        // Filter out tracks whose files have moved or been deleted, so a
+        // stale playlist doesn't fail loading every track silently.
+        tracks = state.tracks.filter { FileManager.default.fileExists(atPath: $0.url.path) }
+        volume = state.volume
+        shuffle = state.shuffle
+        if let mode = RepeatMode(rawValue: state.repeatMode) {
+            repeatMode = mode
+        }
+        eqEnabled = state.eqEnabled
+        preampGain = state.preampGain
+        for (i, g) in state.bandGains.enumerated() where i < bandGains.count {
+            setBand(i, gain: g)
+        }
+
+        // Lazy-load missing artwork in the background so the UI shows it
+        // soon after launch without blocking.
+        Task { [tracks] in
+            for (idx, track) in tracks.enumerated() where track.artwork == nil {
+                if let refreshed = await Track.load(from: track.url) {
+                    await MainActor.run {
+                        guard idx < self.tracks.count, self.tracks[idx].id == track.id else { return }
+                        self.tracks[idx].artwork = refreshed.artwork
+                    }
+                }
+            }
+        }
+
+        if let savedIndex = state.currentIndex,
+           savedIndex >= 0,
+           savedIndex < tracks.count {
+            currentIndex = savedIndex
+            loadCurrent(autoplay: false)
+            if state.currentTime > 0 && state.currentTime < duration {
+                seek(to: state.currentTime)
+            }
+        }
+        updateNowPlayingInfo()
+    }
+
+    // MARK: - Now Playing Center / remote commands
+
+    private func configureRemoteCommands() {
+        let center = MPRemoteCommandCenter.shared()
+        center.playCommand.addTarget { [weak self] _ in
+            Task { @MainActor in self?.play() }
+            return .success
+        }
+        center.pauseCommand.addTarget { [weak self] _ in
+            Task { @MainActor in self?.pause() }
+            return .success
+        }
+        center.togglePlayPauseCommand.addTarget { [weak self] _ in
+            Task { @MainActor in self?.togglePlay() }
+            return .success
+        }
+        center.nextTrackCommand.addTarget { [weak self] _ in
+            Task { @MainActor in self?.next() }
+            return .success
+        }
+        center.previousTrackCommand.addTarget { [weak self] _ in
+            Task { @MainActor in self?.previous() }
+            return .success
+        }
+        center.stopCommand.addTarget { [weak self] _ in
+            Task { @MainActor in self?.stop() }
+            return .success
+        }
+        center.changePlaybackPositionCommand.addTarget { [weak self] event in
+            guard let event = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
+            Task { @MainActor in self?.seek(to: event.positionTime) }
+            return .success
+        }
+        center.changePlaybackPositionCommand.isEnabled = true
+    }
+
+    func updateNowPlayingInfo() {
+        let info = MPNowPlayingInfoCenter.default()
+        guard let track = currentTrack else {
+            info.nowPlayingInfo = nil
+            info.playbackState = .stopped
+            return
+        }
+        var dict: [String: Any] = [
+            MPMediaItemPropertyTitle: track.title,
+            MPMediaItemPropertyPlaybackDuration: track.duration,
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: currentTime,
+            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0,
+        ]
+        if let artist = track.artist { dict[MPMediaItemPropertyArtist] = artist }
+        if let album = track.album { dict[MPMediaItemPropertyAlbumTitle] = album }
+        if let data = track.artwork, let img = NSImage(data: data) {
+            let art = MPMediaItemArtwork(boundsSize: img.size) { _ in img }
+            dict[MPMediaItemPropertyArtwork] = art
+        }
+        info.nowPlayingInfo = dict
+        info.playbackState = isPlaying ? .playing : .paused
+    }
+
+    private func updateNowPlayingTimeIfNeeded() {
+        // Don't spam the system; refresh elapsed-time at most once per second.
+        let now = Date()
+        guard now.timeIntervalSince(nowPlayingThrottle) > 1.0 else { return }
+        nowPlayingThrottle = now
+        var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
+        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = currentTime
+        info[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? 1.0 : 0.0
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+    }
+
+    // MARK: - Output device selection (Core Audio HAL)
+
+    func refreshOutputDevices() {
+        availableOutputDevices = OutputDeviceManager.list()
+        currentOutputDeviceID = OutputDeviceManager.current(of: engine)
+    }
+
+    func setOutputDevice(_ id: AudioDeviceID) {
+        guard OutputDeviceManager.set(deviceID: id, on: engine) else { return }
+        currentOutputDeviceID = id
+        // Re-install the spectrum tap because the engine's main mixer
+        // output format can change with the device.
+        installTap()
+    }
+}
+
+// MARK: - Output device value type
+
+struct OutputDevice: Identifiable, Hashable {
+    let id: AudioDeviceID
+    let name: String
 }

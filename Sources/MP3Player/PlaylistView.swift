@@ -66,7 +66,7 @@ struct PlaylistView: View {
             PlasticButton("SEL",   width: 28, height: 16) {
                 selection = Set(player.tracks.map(\.id))
             }
-            PlasticButton("MISC",  width: 32, height: 16) { player.clear(); selection.removeAll() }
+            miscMenu
             Spacer()
             Text(positionText)
                 .font(.system(size: 9, weight: .bold, design: .monospaced))
@@ -87,6 +87,40 @@ struct PlaylistView: View {
                 .overlay(Bevel(pressed: true))
         }
         .padding(.top, 4)
+    }
+
+    private var miscMenu: some View {
+        Menu {
+            Section("Sleep timer") {
+                Button(player.sleepTimerEnd == nil ? "Off" : "Off (cancel)") {
+                    player.setSleepTimer(minutes: nil)
+                }
+                Button("In 15 minutes") { player.setSleepTimer(minutes: 15) }
+                Button("In 30 minutes") { player.setSleepTimer(minutes: 30) }
+                Button("In 60 minutes") { player.setSleepTimer(minutes: 60) }
+                Button("In 90 minutes") { player.setSleepTimer(minutes: 90) }
+            }
+            Divider()
+            Button("Clear playlist") {
+                player.clear()
+                selection.removeAll()
+            }
+            .disabled(player.tracks.isEmpty)
+        } label: {
+            ZStack {
+                LinearGradient(colors: [Win.faceLight, Win.face],
+                               startPoint: .top, endPoint: .bottom)
+                Text("MISC")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundStyle(player.sleepTimerEnd != nil ? Win.amber : .white.opacity(0.85))
+                    .shadow(color: player.sleepTimerEnd != nil ? Win.amber.opacity(0.6) : .clear, radius: 1)
+            }
+            .frame(width: 32, height: 16)
+            .overlay(Bevel())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
     }
 
     private var positionText: String {

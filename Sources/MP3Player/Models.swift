@@ -1,14 +1,57 @@
 import Foundation
 import AVFoundation
 
-struct Track: Identifiable, Hashable {
-    let id = UUID()
+struct Track: Identifiable, Hashable, Codable {
+    let id: UUID
     let url: URL
     var title: String
     var artist: String?
     var album: String?
     var duration: TimeInterval
     var artwork: Data?
+
+    init(id: UUID = UUID(),
+         url: URL,
+         title: String,
+         artist: String? = nil,
+         album: String? = nil,
+         duration: TimeInterval,
+         artwork: Data? = nil) {
+        self.id = id
+        self.url = url
+        self.title = title
+        self.artist = artist
+        self.album = album
+        self.duration = duration
+        self.artwork = artwork
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        // Artwork is intentionally omitted from persistence — it can be
+        // 100s of KB per track. Restore reloads it lazily from the file.
+        case id, url, title, artist, album, duration
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decode(UUID.self, forKey: .id)
+        self.url = try c.decode(URL.self, forKey: .url)
+        self.title = try c.decode(String.self, forKey: .title)
+        self.artist = try c.decodeIfPresent(String.self, forKey: .artist)
+        self.album = try c.decodeIfPresent(String.self, forKey: .album)
+        self.duration = try c.decode(TimeInterval.self, forKey: .duration)
+        self.artwork = nil
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(url, forKey: .url)
+        try c.encode(title, forKey: .title)
+        try c.encodeIfPresent(artist, forKey: .artist)
+        try c.encodeIfPresent(album, forKey: .album)
+        try c.encode(duration, forKey: .duration)
+    }
 
     static func == (lhs: Track, rhs: Track) -> Bool { lhs.id == rhs.id }
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
