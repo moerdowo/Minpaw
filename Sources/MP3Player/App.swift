@@ -4,7 +4,6 @@ import AppKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var player: PlayerEngine?
     var statusBarController: StatusBarController?
-    private var menuPollTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -26,52 +25,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
-        // Apply the rename now and again on the next runloop tick,
-        // because SwiftUI sometimes installs its menu *after*
-        // applicationDidFinishLaunching returns.
-        renameAppMenuIfNeeded()
-        DispatchQueue.main.async { [weak self] in self?.renameAppMenuIfNeeded() }
-        // Then keep enforcing it for ~3s — SwiftUI rebuilds the menu
-        // when scenes appear or commands re-evaluate, and the rename
-        // gets stomped each time. Polling is the simplest reliable
-        // way to win that race without using private API.
-        var ticks = 0
-        menuPollTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] timer in
-            self?.renameAppMenuIfNeeded()
-            ticks += 1
-            if ticks >= 15 { timer.invalidate() }
-        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     func applicationWillTerminate(_ notification: Notification) {
         player?.saveState()
-    }
-
-    /// Rewrites the macOS application menu to say "Minpaw" instead of
-    /// the executable name (which is "MP3Player" when running via
-    /// `swift run`, since SwiftPM keeps the module name). The bundled
-    /// Minpaw.app already has CFBundleName=Minpaw so this is a no-op
-    /// there.
-    func renameAppMenuIfNeeded() {
-        let target = "Minpaw"
-        let current = ProcessInfo.processInfo.processName
-        guard current != target,
-              let mainMenu = NSApp.mainMenu,
-              let appMenuItem = mainMenu.items.first,
-              let appMenu = appMenuItem.submenu else { return }
-        if appMenuItem.title != target {
-            appMenuItem.title = target
-        }
-        if appMenu.title != target {
-            appMenu.title = target
-        }
-        for item in appMenu.items {
-            if item.title.contains(current) {
-                item.title = item.title.replacingOccurrences(of: current, with: target)
-            }
-        }
     }
 }
 
@@ -83,11 +42,6 @@ struct MP3PlayerApp: App {
     @AppStorage("alwaysOnTop") private var alwaysOnTop: Bool = false
 
     init() {
-        // Run the bundle-name swizzle BEFORE SwiftUI installs its menu
-        // bar. After this point Bundle.main reports CFBundleName as
-        // "Minpaw" so macOS draws the right name at the top of the
-        // screen.
-        AppName.install()
     }
 
     var body: some Scene {
@@ -104,10 +58,8 @@ struct MP3PlayerApp: App {
                     }
                     appDelegate.statusBarController?.setVisible(showStatusBarMenulet)
                     applyAlwaysOnTop(alwaysOnTop)
-                    // SwiftUI installs its menu bar before `onAppear`,
-                    // so by now we can safely retitle the app menu.
-                    appDelegate.renameAppMenuIfNeeded()
                 }
+                .focusEffectDisabled()
                 .onChange(of: showStatusBarMenulet) { _, isVisible in
                     appDelegate.statusBarController?.setVisible(isVisible)
                 }
@@ -132,6 +84,7 @@ struct MP3PlayerApp: App {
             LyricsView()
                 .environmentObject(player)
                 .frame(minWidth: 320, minHeight: 280)
+                .focusEffectDisabled()
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 380, height: 420)
