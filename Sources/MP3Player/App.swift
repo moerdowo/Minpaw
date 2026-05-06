@@ -82,6 +82,14 @@ struct MP3PlayerApp: App {
     @AppStorage("showStatusBarMenulet") private var showStatusBarMenulet: Bool = true
     @AppStorage("alwaysOnTop") private var alwaysOnTop: Bool = false
 
+    init() {
+        // Run the bundle-name swizzle BEFORE SwiftUI installs its menu
+        // bar. After this point Bundle.main reports CFBundleName as
+        // "Minpaw" so macOS draws the right name at the top of the
+        // screen.
+        AppName.install()
+    }
+
     var body: some Scene {
         Window("MINPAW", id: "main") {
             ContentView()
