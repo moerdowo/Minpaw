@@ -7,6 +7,8 @@ import AppKit
 struct LibraryView: View {
     @StateObject private var store = LibraryStore()
     @EnvironmentObject var player: PlayerEngine
+    @State private var trackSelection: Set<UUID> = []
+    @State private var selectionAnchor: UUID? = nil
 
     var body: some View {
         ZStack {
@@ -141,20 +143,20 @@ struct LibraryView: View {
     private var searchBar: some View {
         HStack(spacing: 6) {
             Text("Search:")
-                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
                 .foregroundStyle(Win.lcdGreenDim)
             ZStack(alignment: .leading) {
                 Win.lcdBg
                 TextField("", text: $store.searchText)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(Win.lcdGreen)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
             }
             .overlay(Bevel(pressed: true))
-            .frame(maxWidth: 260)
-            Button("Clear Search") { store.searchText = "" }
+            .frame(width: 160, height: 18)
+            Button("Clear") { store.searchText = "" }
                 .buttonStyle(SoftButton())
                 .disabled(store.searchText.isEmpty)
             Spacer()
@@ -253,7 +255,8 @@ struct LibraryView: View {
     }
 
     private func trackRow(track: Track) -> some View {
-        HStack(spacing: 0) {
+        let isSelected = trackSelection.contains(track.id)
+        return HStack(spacing: 0) {
             Text(track.title)
                 .lineLimit(1)
                 .truncationMode(.tail)
@@ -270,14 +273,79 @@ struct LibraryView: View {
                 .frame(width: 60, alignment: .leading)
         }
         .font(.system(size: 11, design: .monospaced))
-        .foregroundStyle(Win.lcdGreen)
-        .shadow(color: Win.lcdGreen.opacity(0.4), radius: 1)
+        .foregroundStyle(isSelected ? Color.white : Win.lcdGreen)
+        .shadow(color: isSelected ? .clear : Win.lcdGreen.opacity(0.4), radius: 1)
         .padding(.horizontal, 8)
         .padding(.vertical, 1.5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(isSelected ? Color(hex: 0x0A2F4D) : Color.clear)
         .contentShape(Rectangle())
         .onTapGesture(count: 2) {
-            player.enqueue([track], andPlay: true)
+            // Double-click: enqueue (selection or just this track) and play.
+            let targets = contextTargets(clicked: track)
+            player.enqueue(targets, andPlay: true)
         }
+        .onTapGesture {
+            updateSelection(clicked: track)
+        }
+        .contextMenu {
+            let targets = contextTargets(clicked: track)
+            Button("Play") {
+                player.enqueue(targets, andPlay: true)
+            }
+            Button("Add to Playlist") {
+                player.enqueue(targets, andPlay: false)
+            }
+            Button("Reveal in Finder") {
+                NSWorkspace.shared.activateFileViewerSelecting(targets.map(\.url))
+            }
+            Divider()
+            Button("Remove from Library", role: .destructive) {
+                let ids = Set(targets.map(\.id))
+                store.remove(trackIDs: ids)
+                trackSelection.subtract(ids)
+                if let anchor = selectionAnchor, ids.contains(anchor) {
+                    selectionAnchor = nil
+                }
+            }
+        }
+    }
+
+    /// Mac-convention right-click target: if the right-clicked row is in
+    /// the current selection, the menu acts on the whole selection;
+    /// otherwise it acts on just the clicked row.
+    private func contextTargets(clicked: Track) -> [Track] {
+        if trackSelection.contains(clicked.id) {
+            return store.visibleTracks.filter { trackSelection.contains($0.id) }
+        }
+        return [clicked]
+    }
+
+    /// Single-click selection logic that mirrors macOS table behavior:
+    /// plain click replaces, ⌘-click toggles, ⇧-click extends a range
+    /// from the last anchor.
+    private func updateSelection(clicked: Track) {
+        let flags = NSEvent.modifierFlags
+        if flags.contains(.shift), let anchor = selectionAnchor {
+            let visible = store.visibleTracks
+            if let i = visible.firstIndex(where: { $0.id == anchor }),
+               let j = visible.firstIndex(where: { $0.id == clicked.id }) {
+                let lo = min(i, j), hi = max(i, j)
+                trackSelection = Set(visible[lo...hi].map(\.id))
+                return
+            }
+        }
+        if flags.contains(.command) {
+            if trackSelection.contains(clicked.id) {
+                trackSelection.remove(clicked.id)
+            } else {
+                trackSelection.insert(clicked.id)
+            }
+            selectionAnchor = clicked.id
+            return
+        }
+        trackSelection = [clicked.id]
+        selectionAnchor = clicked.id
     }
 
     private func formatDuration(_ t: TimeInterval) -> String {

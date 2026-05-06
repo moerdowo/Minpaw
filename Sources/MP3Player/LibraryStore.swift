@@ -124,6 +124,25 @@ final class LibraryStore: ObservableObject {
         save()
     }
 
+    /// Drops the given tracks (by ID) from the library index. Each
+    /// removed track's `addedDates` entry is also cleaned up so the
+    /// "Recently Added" view doesn't keep referencing dead URLs.
+    func remove(trackIDs ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        let removedURLs = tracks.compactMap { ids.contains($0.id) ? $0.url : nil }
+        tracks.removeAll { ids.contains($0.id) }
+        for url in removedURLs { addedDates.removeValue(forKey: url) }
+        // If the active artist/album filter no longer matches anything,
+        // reset it so the user is not staring at an empty pane.
+        if let artist = selectedArtist, !tracks.contains(where: { $0.artist == artist }) {
+            selectedArtist = nil
+        }
+        if let album = selectedAlbum, !tracks.contains(where: { $0.album == album }) {
+            selectedAlbum = nil
+        }
+        save()
+    }
+
     func reset(filters: Bool) {
         searchText = ""
         if filters {
