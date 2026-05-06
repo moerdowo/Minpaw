@@ -6,8 +6,10 @@ struct PlayerView: View {
     @EnvironmentObject var player: PlayerEngine
     @AppStorage("showEqualizer") private var showEqualizer: Bool = true
     @AppStorage("showPlaylist") private var showPlaylist: Bool = true
+    @Environment(\.openWindow) private var openWindow
     @State private var scrollOffset: CGFloat = 0
     @State private var scrollTimer: Timer?
+    @State private var libraryOpen: Bool = false
 
     var body: some View {
         WinampPanel(title: "MINPAW") {
@@ -23,6 +25,7 @@ struct PlayerView: View {
                 .padding(.top, 2)
                 .padding(.trailing, 4)
         }
+        .onAppear { observeLibraryWindowVisibility() }
     }
 
     private var topRow: some View {
@@ -111,6 +114,45 @@ struct PlayerView: View {
             PlasticButton("PL", pressed: showPlaylist, width: 22, height: 12) {
                 showPlaylist.toggle()
             }
+            PlasticButton("LB", pressed: libraryOpen, width: 22, height: 12) {
+                toggleLibrary()
+            }
+        }
+    }
+
+    private func toggleLibrary() {
+        if let window = libraryWindow, window.isVisible {
+            window.close()
+            libraryOpen = false
+        } else {
+            openWindow(id: "library")
+            libraryOpen = true
+        }
+    }
+
+    private var libraryWindow: NSWindow? {
+        NSApp.windows.first { $0.identifier?.rawValue == "library-window" }
+    }
+
+    private func observeLibraryWindowVisibility() {
+        let center = NotificationCenter.default
+        // Cover both ways the window can come up: opened via the LB
+        // button (already sets state) and opened from the View menu
+        // (Cmd-Shift-B) — didBecomeKey catches that path.
+        center.addObserver(forName: NSWindow.didBecomeKeyNotification,
+                           object: nil, queue: .main) { note in
+            if (note.object as? NSWindow)?.identifier?.rawValue == "library-window" {
+                libraryOpen = true
+            }
+        }
+        center.addObserver(forName: NSWindow.willCloseNotification,
+                           object: nil, queue: .main) { note in
+            if (note.object as? NSWindow)?.identifier?.rawValue == "library-window" {
+                libraryOpen = false
+            }
+        }
+        if let window = libraryWindow, window.isVisible {
+            libraryOpen = true
         }
     }
 

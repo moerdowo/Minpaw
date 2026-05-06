@@ -519,6 +519,9 @@ private final class LibraryChromeView: NSView {
         window.titlebarAppearsTransparent = true
         window.styleMask.insert(.fullSizeContentView)
         window.title = ""
+        // Tag the NSWindow so the player's LB button can locate it
+        // even after we've blanked out the title.
+        window.identifier = NSUserInterfaceItemIdentifier("library-window")
         window.standardWindowButton(.closeButton)?.isHidden = true
         window.standardWindowButton(.miniaturizeButton)?.isHidden = true
         window.standardWindowButton(.zoomButton)?.isHidden = true
