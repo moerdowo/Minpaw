@@ -4,6 +4,7 @@ import AppKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var player: PlayerEngine?
     var statusBarController: StatusBarController?
+    private var menuPollTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -25,6 +26,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+        // Apply the rename now and again on the next runloop tick,
+        // because SwiftUI sometimes installs its menu *after*
+        // applicationDidFinishLaunching returns.
+        renameAppMenuIfNeeded()
+        DispatchQueue.main.async { [weak self] in self?.renameAppMenuIfNeeded() }
+        // Then keep enforcing it for ~3s — SwiftUI rebuilds the menu
+        // when scenes appear or commands re-evaluate, and the rename
+        // gets stomped each time. Polling is the simplest reliable
+        // way to win that race without using private API.
+        var ticks = 0
+        menuPollTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] timer in
+            self?.renameAppMenuIfNeeded()
+            ticks += 1
+            if ticks >= 15 { timer.invalidate() }
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
@@ -45,8 +61,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               let mainMenu = NSApp.mainMenu,
               let appMenuItem = mainMenu.items.first,
               let appMenu = appMenuItem.submenu else { return }
-        appMenuItem.title = target
-        appMenu.title = target
+        if appMenuItem.title != target {
+            appMenuItem.title = target
+        }
+        if appMenu.title != target {
+            appMenu.title = target
+        }
         for item in appMenu.items {
             if item.title.contains(current) {
                 item.title = item.title.replacingOccurrences(of: current, with: target)
