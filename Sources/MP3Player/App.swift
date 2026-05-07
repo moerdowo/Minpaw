@@ -180,6 +180,8 @@ struct MP3PlayerApp: App {
             Divider()
             Button("Stop") { player.stop() }
                 .keyboardShortcut(".", modifiers: [.command])
+            Divider()
+            TransitionToggles().environmentObject(player)
         }
     }
 
@@ -208,6 +210,54 @@ private struct ShowLyricsCommand: View {
     var body: some View {
         Button("Show Lyrics") { openWindow(id: "lyrics") }
             .keyboardShortcut("L", modifiers: [.command])
+    }
+}
+
+/// Menu items for the three transition / loudness features. Each
+/// defaults to off and persists across launches via PlayerEngine's
+/// transition prefs.
+///
+/// Crossfade length is flattened into the parent menu as checkable
+/// items rather than a submenu — `Menu` and `Picker` both render
+/// empty submenus inside SwiftUI's `CommandMenu` on macOS. Toggles
+/// render reliably as checkmarked menu items.
+private struct TransitionToggles: View {
+    @EnvironmentObject var player: PlayerEngine
+
+    var body: some View {
+        Toggle("Gapless Playback", isOn: Binding(
+            get: { player.gaplessEnabled },
+            set: { player.gaplessEnabled = $0 }
+        ))
+        Toggle("Crossfade", isOn: Binding(
+            get: { player.crossfadeEnabled },
+            set: { player.crossfadeEnabled = $0 }
+        ))
+        Section("Crossfade Length") {
+            crossfadeLengthItem(1)
+            crossfadeLengthItem(2)
+            crossfadeLengthItem(3)
+            crossfadeLengthItem(4)
+            crossfadeLengthItem(6)
+            crossfadeLengthItem(8)
+            crossfadeLengthItem(10)
+            crossfadeLengthItem(12)
+        }
+        Toggle("Replay Gain", isOn: Binding(
+            get: { player.replayGainEnabled },
+            set: { player.replayGainEnabled = $0 }
+        ))
+    }
+
+    /// One radio-style toggle for a specific crossfade length. The
+    /// `set` closure ignores `false` so clicking the already-selected
+    /// item is a no-op rather than turning crossfade off.
+    private func crossfadeLengthItem(_ secs: Double) -> some View {
+        Toggle("\(Int(secs)) sec", isOn: Binding(
+            get: { abs(player.crossfadeSeconds - secs) < 0.01 },
+            set: { on in if on { player.crossfadeSeconds = secs } }
+        ))
+        .disabled(!player.crossfadeEnabled)
     }
 }
 

@@ -32,11 +32,16 @@ final class PlayerEngine: ObservableObject {
     @Published var shuffle: Bool = false {
         didSet {
             if shuffle && repeatMode != .off { repeatMode = .off }
+            // The pre-scheduled "next" was chosen under the previous
+            // shuffle/repeat policy; tear it down so the next tick
+            // re-picks under the new policy.
+            cancelPendingTransition()
         }
     }
     @Published var repeatMode: RepeatMode = .off {
         didSet {
             if repeatMode != .off && shuffle { shuffle = false }
+            cancelPendingTransition()
         }
     }
     @Published var preampGain: Float = 0 {
@@ -52,21 +57,113 @@ final class PlayerEngine: ObservableObject {
     @Published var currentOutputDeviceID: AudioDeviceID? = nil
     @Published private(set) var customEQPresets: [EQPreset] = []
 
+    // MARK: - Transition / loudness toggles (default off)
+
+    /// Pre-schedules the next track on the idle player so it begins
+    /// playing the same instant the current one ends — no buffer
+    /// underrun, no silence between tracks.
+    @Published var gaplessEnabled: Bool = false {
+        didSet {
+            if oldValue != gaplessEnabled {
+                cancelPendingTransition()
+                saveTransitionPrefs()
+            }
+        }
+    }
+    /// Overlaps the tail of the current track with the head of the
+    /// next, ramping volumes in opposite directions over
+    /// `crossfadeSeconds`. Takes precedence over `gaplessEnabled` when
+    /// both are on.
+    @Published var crossfadeEnabled: Bool = false {
+        didSet {
+            if oldValue != crossfadeEnabled {
+                cancelPendingTransition()
+                saveTransitionPrefs()
+            }
+        }
+    }
+    /// Length of the crossfade overlap. Clamped to [1, 15].
+    @Published var crossfadeSeconds: Double = 4 {
+        didSet {
+            let clamped = min(15, max(1, crossfadeSeconds))
+            if clamped != crossfadeSeconds {
+                // didSet recursion is safe — Swift only re-runs once
+                // per assignment, and the clamped value matches.
+                crossfadeSeconds = clamped
+                return
+            }
+            cancelPendingTransition()
+            saveTransitionPrefs()
+        }
+    }
+    /// Applies each track's `replaygain_track_gain` tag to the player
+    /// volume so loud and quiet tracks land at roughly the same
+    /// perceived level.
+    @Published var replayGainEnabled: Bool = false {
+        didSet {
+            if oldValue != replayGainEnabled {
+                applyReplayGainVolumes()
+                saveTransitionPrefs()
+            }
+        }
+    }
+
+    // MARK: - Engine
+
     private let engine = AVAudioEngine()
-    private let playerNode = AVAudioPlayerNode()
+    private let playerA = AVAudioPlayerNode()
+    private let playerB = AVAudioPlayerNode()
+    private let preMixer = AVAudioMixerNode()
     private let eq: AVAudioUnitEQ
+
+    /// Toggled to swap which node is "active" (playing the current
+    /// track) and which is "idle" (used to pre-schedule the next one
+    /// for gapless / crossfade).
+    private var useA: Bool = true
+    private var activePlayer: AVAudioPlayerNode { useA ? playerA : playerB }
+    private var idlePlayer:   AVAudioPlayerNode { useA ? playerB : playerA }
+
+    // Per-track state for the active player.
     private var audioFile: AVAudioFile?
-    private var seekFrame: AVAudioFramePosition = 0
     private var fileSampleRate: Double = 44100
+    private var seekFrame: AVAudioFramePosition = 0
+
+    /// Time-anchor model. `currentTime` is computed every tick as
+    /// `activeStartSeconds + (sampleTime - anchorSampleTime) / rate`.
+    /// Reset on track-load, seek, or transition swap.
+    private var activeStartSeconds: Double = 0
+    private var anchorSampleTime: AVAudioFramePosition? = nil
+
+    // Pre-schedule state.
+    private struct PendingNext {
+        let file: AVAudioFile
+        let trackIndex: Int
+        /// True if the idle player has already been started
+        /// (mid-crossfade); false if it is queued via `play(at:)`
+        /// for gapless start.
+        let crossfading: Bool
+        let replayGainDB: Float?
+    }
+    private var pending: PendingNext?
+    private var fadeTimer: Timer?
+    private var fadeStartedAt: Date?
+    private var fadeFromActiveRG: Float = 1
+    private var fadeFromIdleRG: Float = 1
+
     private var ticker: Timer?
     private var sleepTimer: Timer?
     private var nowPlayingThrottle: Date = .distantPast
     private var hasRestoredState: Bool = false
-    // Bumped every time we schedule (or invalidate) a buffer. The
-    // completion handler captures the value at schedule time and only
-    // fires `handleEnd` if the value still matches — so seeks, stops,
-    // and track-changes don't trigger spurious end-of-track callbacks.
-    private var scheduleToken: Int = 0
+
+    /// Per-player completion-callback tokens. Bumped every time we
+    /// schedule (or invalidate) a buffer on the corresponding player.
+    /// Callbacks captured at schedule time only fire if the value
+    /// still matches — so seeks, stops, and track-changes don't
+    /// trigger spurious end-of-track callbacks. With two player nodes,
+    /// each has its own token so cancelling one doesn't disarm the
+    /// other.
+    private var tokenA: Int = 0
+    private var tokenB: Int = 0
 
     var currentTrack: Track? {
         guard let i = currentIndex, i >= 0, i < tracks.count else { return nil }
@@ -85,9 +182,16 @@ final class PlayerEngine: ObservableObject {
             band.bypass = false
         }
 
-        engine.attach(playerNode)
+        engine.attach(playerA)
+        engine.attach(playerB)
+        engine.attach(preMixer)
         engine.attach(eq)
-        engine.connect(playerNode, to: eq, format: nil)
+        // Both players feed a sub-mixer so a single EQ instance can
+        // sit on the combined signal — and so crossfading two tracks
+        // simultaneously is just two `volume` ramps.
+        engine.connect(playerA, to: preMixer, fromBus: 0, toBus: 0, format: nil)
+        engine.connect(playerB, to: preMixer, fromBus: 0, toBus: 1, format: nil)
+        engine.connect(preMixer, to: eq, format: nil)
         engine.connect(eq, to: engine.mainMixerNode, format: nil)
         engine.mainMixerNode.outputVolume = volume
 
@@ -100,6 +204,7 @@ final class PlayerEngine: ObservableObject {
         refreshOutputDevices()
         configureRemoteCommands()
         loadCustomEQPresets()
+        loadTransitionPrefs()
         restoreState()
     }
 
@@ -136,19 +241,180 @@ final class PlayerEngine: ObservableObject {
 
     private func tick() {
         guard isPlaying,
-              let nodeTime = playerNode.lastRenderTime,
-              let playerTime = playerNode.playerTime(forNodeTime: nodeTime)
+              let nodeTime = activePlayer.lastRenderTime,
+              let playerTime = activePlayer.playerTime(forNodeTime: nodeTime)
         else { return }
-        let played = Double(playerTime.sampleTime) / playerTime.sampleRate
-        let absolute = Double(seekFrame) / fileSampleRate + played
+        if anchorSampleTime == nil {
+            anchorSampleTime = playerTime.sampleTime
+        }
+        let anchor = anchorSampleTime ?? playerTime.sampleTime
+        let played = max(0, Double(playerTime.sampleTime - anchor)) / playerTime.sampleRate
+        let absolute = activeStartSeconds + played
         currentTime = max(0, min(duration, absolute))
         updateNowPlayingTimeIfNeeded()
-        // End-of-track is detected via the schedule completion handler,
-        // not from time tracking — playerTime stops updating once the
-        // buffer is consumed, so a tick-based guard would never fire.
+        considerPreScheduling()
+    }
+
+    /// If we're approaching the end of the track and a transition is
+    /// enabled, set up the next track on the idle player. No-op if
+    /// neither toggle is on, if a pending transition already exists,
+    /// or if there is no plausible next track.
+    private func considerPreScheduling() {
+        guard isPlaying,
+              currentTrack != nil,
+              pending == nil,
+              gaplessEnabled || crossfadeEnabled
+        else { return }
+        guard let nextIndex = upcomingTrackIndex() else { return }
+        // Crossfade needs more headroom (the whole overlap window);
+        // gapless only needs enough to schedule + arm.
+        let useCrossfade = crossfadeEnabled
+        let lookahead = useCrossfade ? crossfadeSeconds + 0.25 : 0.5
+        guard duration > 0, currentTime > duration - lookahead else { return }
+        prepareNextTrack(index: nextIndex, crossfade: useCrossfade)
+    }
+
+    /// Predicts which playlist entry should follow the current track,
+    /// honoring the active shuffle / repeat policy. Returns nil when
+    /// playback should stop at the end (single play through).
+    private func upcomingTrackIndex() -> Int? {
+        guard !tracks.isEmpty else { return nil }
+        if shuffle {
+            return randomNextIndex()
+        }
+        switch repeatMode {
+        case .one:
+            return currentIndex
+        case .all:
+            let cur = currentIndex ?? 0
+            return (cur + 1) % tracks.count
+        case .off:
+            let cur = currentIndex ?? 0
+            return cur + 1 < tracks.count ? cur + 1 : nil
+        }
+    }
+
+    private func prepareNextTrack(index: Int, crossfade: Bool) {
+        guard index >= 0, index < tracks.count else { return }
+        let nextTrack = tracks[index]
+        guard let file = try? AVAudioFile(forReading: nextTrack.url) else { return }
+
+        let nextRG = volumeForRG(nextTrack.replayGainDB)
+        if crossfade {
+            // Idle player will ramp 0 → nextRG; start silent.
+            idlePlayer.volume = 0
+        } else {
+            idlePlayer.volume = nextRG
+        }
+
+        scheduleAndArm(player: idlePlayer, file: file, startingFrame: 0)
+
+        if crossfade {
+            // Begin playback immediately so the overlap window starts.
+            if !engine.isRunning { try? engine.start() }
+            idlePlayer.play()
+            startCrossfadeRamp(activeRG: currentTrackRGGain(), idleRG: nextRG)
+        } else {
+            // Gapless: queue the idle player to start at the precise
+            // host time the active player runs out.
+            scheduleNextStartAtEndOfCurrent()
+        }
+
+        pending = PendingNext(file: file,
+                              trackIndex: index,
+                              crossfading: crossfade,
+                              replayGainDB: nextTrack.replayGainDB)
+    }
+
+    /// Computes the host time at which the active track's audio will
+    /// stop and arms the idle player to start playing then. Falls back
+    /// to a "play now" if the player isn't reporting a render time.
+    private func scheduleNextStartAtEndOfCurrent() {
+        guard let curNodeTime = activePlayer.lastRenderTime,
+              let curPlayerTime = activePlayer.playerTime(forNodeTime: curNodeTime)
+        else {
+            if !engine.isRunning { try? engine.start() }
+            idlePlayer.play()
+            return
+        }
+        let remaining = max(0.05, duration - currentTime)
+        let hostOffset = AVAudioTime.hostTime(forSeconds: remaining)
+        let endHostTime = curPlayerTime.hostTime + hostOffset
+        let when = AVAudioTime(hostTime: endHostTime)
+        if !engine.isRunning { try? engine.start() }
+        idlePlayer.play(at: when)
+    }
+
+    private func startCrossfadeRamp(activeRG: Float, idleRG: Float) {
+        fadeTimer?.invalidate()
+        fadeStartedAt = Date()
+        fadeFromActiveRG = activeRG
+        fadeFromIdleRG = idleRG
+        fadeTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.tickCrossfade() }
+        }
+    }
+
+    private func tickCrossfade() {
+        guard let started = fadeStartedAt else { return }
+        let dur = max(0.1, crossfadeSeconds)
+        let progress = max(0, min(1, Date().timeIntervalSince(started) / dur))
+        activePlayer.volume = fadeFromActiveRG * Float(1 - progress)
+        idlePlayer.volume = fadeFromIdleRG * Float(progress)
+        if progress >= 1 {
+            fadeTimer?.invalidate()
+            fadeTimer = nil
+            // The active player's `.dataPlayedBack` callback fires
+            // shortly after this — that's where the swap happens.
+        }
+    }
+
+    /// Swaps active/idle pointers and rebases time accounting for the
+    /// already-scheduled next track. Called from `handleEnd` when a
+    /// pre-scheduled transition was in flight.
+    private func commitTransition(_ pending: PendingNext) {
+        fadeTimer?.invalidate()
+        fadeTimer = nil
+        fadeStartedAt = nil
+
+        let oldActive = activePlayer
+        useA.toggle()
+        // Old active is now idle: flush any leftover scheduled audio
+        // and reset its volume so a future pre-schedule starts clean.
+        oldActive.stop()
+        oldActive.volume = 1
+
+        // New active is whichever became `activePlayer` after toggle.
+        audioFile = pending.file
+        fileSampleRate = pending.file.processingFormat.sampleRate
+        duration = Double(pending.file.length) / fileSampleRate
+        seekFrame = 0
+        // Crossfade has already been audible for `crossfadeSeconds`,
+        // so the new track's wall-clock position is non-zero on entry.
+        activeStartSeconds = pending.crossfading
+            ? min(crossfadeSeconds, max(0, duration))
+            : 0
+        anchorSampleTime = nil
+        activePlayer.volume = volumeForRG(pending.replayGainDB)
+
+        currentIndex = pending.trackIndex
+        isPlaying = true
+        NotificationCenter.default.post(
+            name: .minpawTrackStartedPlaying,
+            object: tracks[pending.trackIndex].url
+        )
+        updateNowPlayingInfo()
+        saveState()
+        self.pending = nil
     }
 
     private func handleEnd() {
+        // If a transition is pending, the next track is already
+        // playing (crossfade) or queued (gapless). Just commit.
+        if let p = pending {
+            commitTransition(p)
+            return
+        }
         switch repeatMode {
         case .one:
             seek(to: 0)
@@ -157,8 +423,6 @@ final class PlayerEngine: ObservableObject {
             next()
         case .off:
             if shuffle {
-                // With shuffle on, keep playing forever — the user has
-                // to stop manually. Matches typical shuffle UX.
                 next()
             } else if let i = currentIndex, i + 1 < tracks.count {
                 next()
@@ -168,41 +432,104 @@ final class PlayerEngine: ObservableObject {
         }
     }
 
-    /// Schedules the given file (or segment of it) for playback and arms
-    /// a completion handler that fires `handleEnd` once the audio has
-    /// actually been rendered. Returns after the schedule call is queued.
-    private func scheduleAndArm(file: AVAudioFile, startingFrame: AVAudioFramePosition) {
-        scheduleToken &+= 1
-        let token = scheduleToken
+    /// Schedules the given file (or segment of it) on the given player
+    /// node, arming a completion handler that fires `handleEnd` when
+    /// that buffer is fully rendered AND the player is still the
+    /// active one. Per-player tokens guard against stale callbacks.
+    private func scheduleAndArm(player: AVAudioPlayerNode,
+                                file: AVAudioFile,
+                                startingFrame: AVAudioFramePosition) {
+        let isA = (player === playerA)
+        let token: Int
+        if isA { tokenA &+= 1; token = tokenA }
+        else   { tokenB &+= 1; token = tokenB }
+
         if startingFrame == 0 {
-            playerNode.scheduleFile(
+            player.scheduleFile(
                 file,
                 at: nil,
                 completionCallbackType: .dataPlayedBack
             ) { [weak self] _ in
-                self?.completionFired(token: token)
+                self?.completionFired(isA: isA, token: token)
             }
         } else {
             let remaining = file.length - startingFrame
             guard remaining > 0 else { return }
-            playerNode.scheduleSegment(
+            player.scheduleSegment(
                 file,
                 startingFrame: startingFrame,
                 frameCount: AVAudioFrameCount(remaining),
                 at: nil,
                 completionCallbackType: .dataPlayedBack
             ) { [weak self] _ in
-                self?.completionFired(token: token)
+                self?.completionFired(isA: isA, token: token)
             }
         }
     }
 
-    nonisolated private func completionFired(token: Int) {
+    nonisolated private func completionFired(isA: Bool, token: Int) {
         Task { @MainActor [weak self] in
-            guard let self,
-                  self.scheduleToken == token,
-                  self.isPlaying else { return }
+            guard let self else { return }
+            let cur = isA ? self.tokenA : self.tokenB
+            guard cur == token, self.isPlaying else { return }
+            // Only fire boundary for the player that is *currently*
+            // active. An idle pre-schedule's completion will be reached
+            // after the swap, at which point `useA` has been toggled
+            // and `isA == useA` again — so the guard still passes.
+            guard isA == self.useA else { return }
             self.handleEnd()
+        }
+    }
+
+    /// Tear down a queued transition: stop the idle player (which
+    /// flushes any `play(at:)` that hasn't fired), clear the fade
+    /// timer, and reset `pending`. Bumps the idle player's token so
+    /// any in-flight completion handler is ignored.
+    private func cancelPendingTransition() {
+        let wasFading = fadeTimer != nil
+        if wasFading {
+            fadeTimer?.invalidate()
+            fadeTimer = nil
+            fadeStartedAt = nil
+        }
+        if pending != nil {
+            idlePlayer.stop()
+            // Bump the idle player's token to invalidate any pending
+            // completion callback.
+            if useA { tokenB &+= 1 } else { tokenA &+= 1 }
+            idlePlayer.volume = 1
+            pending = nil
+        }
+        if wasFading {
+            // The fade may have ramped the active player partway to
+            // silence — restore it to its replay-gain baseline so the
+            // current track keeps playing at the right level.
+            activePlayer.volume = currentTrackRGGain()
+        }
+    }
+
+    private func volumeForRG(_ db: Float?) -> Float {
+        guard replayGainEnabled, let db else { return 1 }
+        // Cap at +6 dB so a mistagged file can't blow the user's ears
+        // out, and at -30 dB so we don't silence a track entirely.
+        let clamped = min(6, max(-30, db))
+        return pow(10, clamped / 20)
+    }
+
+    private func currentTrackRGGain() -> Float {
+        volumeForRG(currentTrack?.replayGainDB)
+    }
+
+    private func applyReplayGainVolumes() {
+        // Don't fight the crossfade ramp.
+        guard fadeTimer == nil else { return }
+        if currentTrack != nil {
+            activePlayer.volume = currentTrackRGGain()
+        } else {
+            activePlayer.volume = 1
+        }
+        if let p = pending {
+            idlePlayer.volume = volumeForRG(p.replayGainDB)
         }
     }
 
@@ -254,6 +581,8 @@ final class PlayerEngine: ObservableObject {
         if let id = nowPlayingID {
             currentIndex = tracks.firstIndex(where: { $0.id == id })
         }
+        // Indices for any pre-scheduled "next" are no longer reliable.
+        cancelPendingTransition()
         saveState()
     }
 
@@ -267,6 +596,7 @@ final class PlayerEngine: ObservableObject {
             let removedBefore = indices.filter { $0 < cur }.count
             currentIndex = cur - removedBefore
         }
+        cancelPendingTransition()
         saveState()
     }
 
@@ -297,23 +627,24 @@ final class PlayerEngine: ObservableObject {
         guard let track = currentTrack else { return }
         do {
             let file = try AVAudioFile(forReading: track.url)
+            cancelPendingTransition()
+            // Stop the idle player too in case we're switching from
+            // a transition that had already started ramping.
+            idlePlayer.stop()
+            idlePlayer.volume = 1
             audioFile = file
             fileSampleRate = file.processingFormat.sampleRate
             duration = Double(file.length) / fileSampleRate
             seekFrame = 0
             currentTime = 0
-            playerNode.stop()
-            // Replay Gain — apply per-track gain at the player node so the
-            // user's main volume slider on the mixer is unaffected.
-            if let db = track.replayGainDB {
-                playerNode.volume = pow(10, db / 20)
-            } else {
-                playerNode.volume = 1
-            }
-            scheduleAndArm(file: file, startingFrame: 0)
+            activeStartSeconds = 0
+            anchorSampleTime = nil
+            activePlayer.stop()
+            activePlayer.volume = volumeForRG(track.replayGainDB)
+            scheduleAndArm(player: activePlayer, file: file, startingFrame: 0)
             if autoplay {
                 if !engine.isRunning { try? engine.start() }
-                playerNode.play()
+                activePlayer.play()
                 isPlaying = true
             } else {
                 isPlaying = false
@@ -331,11 +662,15 @@ final class PlayerEngine: ObservableObject {
             return
         }
         if isPlaying {
-            playerNode.pause()
+            // A scheduled `play(at:)` for gapless will fire on host
+            // time even while we're paused, so cancel any pending
+            // transition before pausing.
+            cancelPendingTransition()
+            activePlayer.pause()
             isPlaying = false
         } else {
             if !engine.isRunning { try? engine.start() }
-            playerNode.play()
+            activePlayer.play()
             isPlaying = true
         }
         updateNowPlayingInfo()
@@ -347,29 +682,36 @@ final class PlayerEngine: ObservableObject {
             return
         }
         if !engine.isRunning { try? engine.start() }
-        playerNode.play()
+        activePlayer.play()
         isPlaying = true
         updateNowPlayingInfo()
     }
 
     func pause() {
-        playerNode.pause()
+        cancelPendingTransition()
+        activePlayer.pause()
         isPlaying = false
         updateNowPlayingInfo()
         saveState()
     }
 
     func stop() {
-        playerNode.stop()
-        // Bump the token so any in-flight completion from the prior
-        // schedule is ignored when it fires.
-        scheduleToken &+= 1
+        cancelPendingTransition()
+        activePlayer.stop()
+        idlePlayer.stop()
+        // Bump tokens so any in-flight completion is ignored.
+        tokenA &+= 1
+        tokenB &+= 1
         isPlaying = false
         seekFrame = 0
+        activeStartSeconds = 0
+        anchorSampleTime = nil
         currentTime = 0
+        // Re-arm the active player with the current file from the top
+        // so a follow-up play() resumes at frame 0.
         if let track = currentTrack, let file = try? AVAudioFile(forReading: track.url) {
             audioFile = file
-            playerNode.scheduleFile(file, at: nil, completionHandler: nil)
+            activePlayer.scheduleFile(file, at: nil, completionHandler: nil)
         }
         updateNowPlayingInfo()
         saveState()
@@ -377,6 +719,8 @@ final class PlayerEngine: ObservableObject {
 
     func next() {
         guard !tracks.isEmpty else { return }
+        // A user-initiated next throws away any in-flight transition.
+        cancelPendingTransition()
         play(index: shuffle ? randomNextIndex() : ((currentIndex ?? -1) + 1) % tracks.count)
     }
 
@@ -386,6 +730,7 @@ final class PlayerEngine: ObservableObject {
             seek(to: 0)
             return
         }
+        cancelPendingTransition()
         play(index: shuffle ? randomNextIndex() : ((currentIndex ?? 0) - 1 + tracks.count) % tracks.count)
     }
 
@@ -404,14 +749,18 @@ final class PlayerEngine: ObservableObject {
         let frame = AVAudioFramePosition(target * fileSampleRate)
         let remaining = file.length - frame
         guard remaining > 0 else { return }
+        cancelPendingTransition()
         let wasPlaying = isPlaying
-        playerNode.stop()
+        activePlayer.stop()
         seekFrame = frame
-        scheduleAndArm(file: file, startingFrame: frame)
+        activeStartSeconds = target
+        anchorSampleTime = nil
+        activePlayer.volume = volumeForRG(currentTrack?.replayGainDB)
+        scheduleAndArm(player: activePlayer, file: file, startingFrame: frame)
         currentTime = target
         if wasPlaying {
             if !engine.isRunning { try? engine.start() }
-            playerNode.play()
+            activePlayer.play()
             isPlaying = true
         }
     }
@@ -491,7 +840,7 @@ final class PlayerEngine: ObservableObject {
         }
     }
 
-    // MARK: - Persistence
+    // MARK: - Persistence (playlist + transition prefs)
 
     private struct PersistedState: Codable {
         var tracks: [Track]
@@ -568,6 +917,42 @@ final class PlayerEngine: ObservableObject {
             }
         }
         updateNowPlayingInfo()
+    }
+
+    private struct TransitionPrefs: Codable {
+        var gaplessEnabled: Bool
+        var crossfadeEnabled: Bool
+        var crossfadeSeconds: Double
+        var replayGainEnabled: Bool
+    }
+
+    private static let transitionKey = "minpaw.transitionPrefs.v1"
+    private var loadingTransitionPrefs: Bool = false
+
+    private func saveTransitionPrefs() {
+        // Avoid clobbering on initial load.
+        guard !loadingTransitionPrefs else { return }
+        let prefs = TransitionPrefs(
+            gaplessEnabled: gaplessEnabled,
+            crossfadeEnabled: crossfadeEnabled,
+            crossfadeSeconds: crossfadeSeconds,
+            replayGainEnabled: replayGainEnabled
+        )
+        if let data = try? JSONEncoder().encode(prefs) {
+            UserDefaults.standard.set(data, forKey: Self.transitionKey)
+        }
+    }
+
+    private func loadTransitionPrefs() {
+        guard let data = UserDefaults.standard.data(forKey: Self.transitionKey),
+              let prefs = try? JSONDecoder().decode(TransitionPrefs.self, from: data)
+        else { return }
+        loadingTransitionPrefs = true
+        gaplessEnabled = prefs.gaplessEnabled
+        crossfadeEnabled = prefs.crossfadeEnabled
+        crossfadeSeconds = prefs.crossfadeSeconds
+        replayGainEnabled = prefs.replayGainEnabled
+        loadingTransitionPrefs = false
     }
 
     // MARK: - Now Playing Center / remote commands
