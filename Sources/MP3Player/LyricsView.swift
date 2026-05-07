@@ -29,6 +29,18 @@ struct LyricsView: View {
         }
         .background(LyricsWindowChrome())
         .preferredColorScheme(.dark)
+        // Lyrics aren't persisted, so a track restored from disk has
+        // `track.lyrics == nil` even when the file actually has a USLT
+        // / ©lyr frame. Kick off an async fetch so the panel populates
+        // when this window opens or the playing track changes.
+        .onAppear { fetchLyricsIfNeeded() }
+        .onChange(of: player.currentTrack?.id) { _, _ in fetchLyricsIfNeeded() }
+    }
+
+    private func fetchLyricsIfNeeded() {
+        guard let track = player.currentTrack else { return }
+        guard track.lyrics == nil else { return }
+        player.loadLyricsIfMissing(forTrackID: track.id)
     }
 
     private var trackHeader: some View {
@@ -106,6 +118,9 @@ private final class LyricsChromeView: NSView {
         window.titlebarAppearsTransparent = true
         window.styleMask.insert(.fullSizeContentView)
         window.title = ""
+        // Tag the NSWindow so the player's LY toggle can find and
+        // close it (and pick up its visibility state on launch).
+        window.identifier = NSUserInterfaceItemIdentifier("lyrics-window")
         window.standardWindowButton(.closeButton)?.isHidden = true
         window.standardWindowButton(.miniaturizeButton)?.isHidden = true
         window.standardWindowButton(.zoomButton)?.isHidden = true

@@ -609,6 +609,34 @@ final class PlayerEngine: ObservableObject {
         saveState()
     }
 
+    /// On-demand fetch for `track.lyrics` when the in-memory copy is
+    /// nil. Lyrics aren't persisted — tracks restored from disk (or
+    /// enqueued from a library entry that itself was restored) start
+    /// with `nil` lyrics even if the file actually has a USLT / ©lyr
+    /// frame. The lyrics window calls this when its track changes so
+    /// the panel populates without blocking the UI.
+    private var lyricFetchInflight: Set<UUID> = []
+
+    func loadLyricsIfMissing(forTrackID id: UUID) {
+        guard let idx = tracks.firstIndex(where: { $0.id == id }) else { return }
+        guard tracks[idx].lyrics == nil else { return }
+        guard !lyricFetchInflight.contains(id) else { return }
+        lyricFetchInflight.insert(id)
+        let url = tracks[idx].url
+        Task { [weak self] in
+            let refreshed = await Track.load(from: url)
+            await MainActor.run {
+                guard let self else { return }
+                self.lyricFetchInflight.remove(id)
+                guard let lyrics = refreshed?.lyrics, !lyrics.isEmpty else { return }
+                guard let i = self.tracks.firstIndex(where: { $0.id == id }) else { return }
+                if self.tracks[i].lyrics == nil {
+                    self.tracks[i].lyrics = lyrics
+                }
+            }
+        }
+    }
+
     // MARK: - Playback
 
     func play(index: Int) {
@@ -894,14 +922,17 @@ final class PlayerEngine: ObservableObject {
             setBand(i, gain: g)
         }
 
-        // Lazy-load missing artwork in the background so the UI shows it
-        // soon after launch without blocking.
+        // Lazy-load missing artwork and lyrics in the background so
+        // the UI shows them soon after launch without blocking.
+        // Neither is persisted (both can be hundreds of KB) so they
+        // start nil after every restart.
         Task { [tracks] in
-            for (idx, track) in tracks.enumerated() where track.artwork == nil {
+            for (idx, track) in tracks.enumerated() where track.artwork == nil || track.lyrics == nil {
                 if let refreshed = await Track.load(from: track.url) {
                     await MainActor.run {
                         guard idx < self.tracks.count, self.tracks[idx].id == track.id else { return }
-                        self.tracks[idx].artwork = refreshed.artwork
+                        if self.tracks[idx].artwork == nil { self.tracks[idx].artwork = refreshed.artwork }
+                        if self.tracks[idx].lyrics == nil { self.tracks[idx].lyrics = refreshed.lyrics }
                     }
                 }
             }

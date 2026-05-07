@@ -102,6 +102,11 @@ extension Track {
         // Replay Gain and lyrics live in format-specific metadata
         // (TXXX:REPLAYGAIN_TRACK_GAIN / USLT in ID3, ----:com.apple.iTunes
         // RPG / ©lyr in MP4). Walk every available format.
+        //
+        // Lyrics resolution prefers a real USLT / ©lyr over a TXXX /
+        // ---- frame-with-description fallback — track the best
+        // candidate and only commit it after every item is examined.
+        var lyricsCandidate: (text: String, primary: Bool)? = nil
         if let formats = try? await asset.load(.availableMetadataFormats) {
             for format in formats {
                 guard let items = try? await asset.loadMetadata(for: format) else { continue }
@@ -110,13 +115,16 @@ extension Track {
                        let db = await Self.parseReplayGain(item: item) {
                         replayGainDB = db
                     }
-                    if lyrics == nil,
-                       let lyric = await Self.parseLyrics(item: item) {
-                        lyrics = lyric
+                    if let candidate = await Self.parseLyrics(item: item) {
+                        if lyricsCandidate == nil
+                            || (candidate.primary && !(lyricsCandidate?.primary ?? false)) {
+                            lyricsCandidate = candidate
+                        }
                     }
                 }
             }
         }
+        lyrics = lyricsCandidate?.text
         return Track(url: url, title: title, artist: artist, album: album,
                      duration: duration, artwork: artwork,
                      replayGainDB: replayGainDB, lyrics: lyrics)
@@ -136,16 +144,62 @@ extension Track {
         return Float(cleaned)
     }
 
-    private static func parseLyrics(item: AVMetadataItem) async -> String? {
-        let key = (item.key as? String) ?? ""
-        let identifier = item.identifier?.rawValue ?? ""
-        let isUSLT = key.uppercased().contains("USLT") || identifier.contains("USLT")
-        let isMP4Lyric = identifier.lowercased().contains("lyr")
-        let isCommonLyrics = item.commonKey == .commonKeyType && false  // none defined
-        guard isUSLT || isMP4Lyric || isCommonLyrics else { return nil }
-        let value: String? = try? await item.load(.stringValue)
-        if let v = value, !v.isEmpty { return v }
-        return nil
+    private static let lyricsIdentifiers: Set<AVMetadataIdentifier> = [
+        .id3MetadataUnsynchronizedLyric,
+        .iTunesMetadataLyrics,
+    ]
+
+    /// Result of a lyrics-frame match. `primary == true` when the
+    /// item was a real USLT / ©lyr frame (preferred); `false` when
+    /// it was a TXXX / ---- user-defined-text frame whose description
+    /// happened to be a lyrics flavor.
+    private static func parseLyrics(item: AVMetadataItem) async -> (text: String, primary: Bool)? {
+        let raw = (item.identifier?.rawValue ?? "").lowercased()
+        let key = ((item.key as? String) ?? "").lowercased()
+
+        // 1. Well-known identifiers — real USLT (ID3) / ©lyr (iTunes).
+        var primary = item.identifier.map { Self.lyricsIdentifiers.contains($0) } ?? false
+
+        // 2. Substring fallback for non-standard identifiers that
+        //    still reference USLT or ©lyr — also treated as primary
+        //    because the frame itself is the real lyrics frame, just
+        //    surfaced under an unexpected identifier.
+        if !primary {
+            if raw.contains("uslt") || key.contains("uslt") { primary = true }
+            else if raw.contains("itsk/©lyr") || raw.contains("itsk/%a9lyr") { primary = true }
+        }
+
+        var fallback = false
+        // 3. Only consult TXXX / ---- user-defined-text frames if no
+        //    real lyrics frame matched on this item. Some taggers
+        //    (yt-dlp, several Asian-music tools) embed lyrics here
+        //    with a description like "USLT" / "lyrics" / "lyrics-eng".
+        if !primary {
+            let isUserText = raw.contains("/txxx") || raw.contains("----")
+            if isUserText, let extras = try? await item.load(.extraAttributes) {
+                if let info = extras[.info] as? String {
+                    let lower = info.lowercased()
+                    if lower.contains("uslt") || lower.contains("lyric") { fallback = true }
+                }
+            }
+        }
+
+        guard primary || fallback else { return nil }
+
+        var text: String? = nil
+        if let value = try? await item.load(.stringValue), !value.isEmpty {
+            text = value
+        }
+        // Fall back to the raw bytes — some files store USLT with a
+        // non-standard encoding byte that AVFoundation can't decode
+        // into `stringValue`.
+        if text == nil, let data = try? await item.load(.dataValue), !data.isEmpty {
+            if let s = String(data: data, encoding: .utf8), !s.isEmpty { text = s }
+            else if let s = String(data: data, encoding: .utf16), !s.isEmpty { text = s }
+            else if let s = String(data: data, encoding: .isoLatin1), !s.isEmpty { text = s }
+        }
+        guard let text, !text.isEmpty else { return nil }
+        return (text, primary)
     }
 }
 

@@ -10,6 +10,7 @@ struct PlayerView: View {
     @State private var scrollOffset: CGFloat = 0
     @State private var scrollTimer: Timer?
     @State private var libraryOpen: Bool = false
+    @State private var lyricsOpen: Bool = false
 
     var body: some View {
         WinampPanel(title: "MINPAW") {
@@ -25,7 +26,7 @@ struct PlayerView: View {
                 .padding(.top, 2)
                 .padding(.trailing, 4)
         }
-        .onAppear { observeLibraryWindowVisibility() }
+        .onAppear { observeAuxWindowVisibility() }
     }
 
     private var topRow: some View {
@@ -114,6 +115,9 @@ struct PlayerView: View {
             PlasticButton("PL", pressed: showPlaylist, width: 22, height: 12) {
                 showPlaylist.toggle()
             }
+            PlasticButton("LY", pressed: lyricsOpen, width: 22, height: 12) {
+                toggleLyrics()
+            }
             PlasticButton("LB", pressed: libraryOpen, width: 22, height: 12) {
                 toggleLibrary()
             }
@@ -130,30 +134,47 @@ struct PlayerView: View {
         }
     }
 
+    private func toggleLyrics() {
+        if let window = lyricsWindow, window.isVisible {
+            window.close()
+            lyricsOpen = false
+        } else {
+            openWindow(id: "lyrics")
+            lyricsOpen = true
+        }
+    }
+
     private var libraryWindow: NSWindow? {
         NSApp.windows.first { $0.identifier?.rawValue == "library-window" }
     }
 
-    private func observeLibraryWindowVisibility() {
+    private var lyricsWindow: NSWindow? {
+        NSApp.windows.first { $0.identifier?.rawValue == "lyrics-window" }
+    }
+
+    private func observeAuxWindowVisibility() {
         let center = NotificationCenter.default
-        // Cover both ways the window can come up: opened via the LB
-        // button (already sets state) and opened from the View menu
-        // (Cmd-Shift-B) — didBecomeKey catches that path.
+        // Cover both ways either window can come up: via the LB / LY
+        // button (which already sets state) and via View menu items
+        // (⇧⌘B / ⌘L) — didBecomeKey catches that second path.
         center.addObserver(forName: NSWindow.didBecomeKeyNotification,
                            object: nil, queue: .main) { note in
-            if (note.object as? NSWindow)?.identifier?.rawValue == "library-window" {
-                libraryOpen = true
+            switch (note.object as? NSWindow)?.identifier?.rawValue {
+            case "library-window": libraryOpen = true
+            case "lyrics-window":  lyricsOpen  = true
+            default: break
             }
         }
         center.addObserver(forName: NSWindow.willCloseNotification,
                            object: nil, queue: .main) { note in
-            if (note.object as? NSWindow)?.identifier?.rawValue == "library-window" {
-                libraryOpen = false
+            switch (note.object as? NSWindow)?.identifier?.rawValue {
+            case "library-window": libraryOpen = false
+            case "lyrics-window":  lyricsOpen  = false
+            default: break
             }
         }
-        if let window = libraryWindow, window.isVisible {
-            libraryOpen = true
-        }
+        if let window = libraryWindow, window.isVisible { libraryOpen = true }
+        if let window = lyricsWindow,  window.isVisible { lyricsOpen  = true }
     }
 
     private var transportRow: some View {
