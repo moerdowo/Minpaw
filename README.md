@@ -76,3 +76,7 @@ Sources/MP3Player/
 - Spectrum is per-band RMS of the live mixer output — responsive to overall
   energy, not spectrally accurate. Swap in vDSP FFT in
   `PlayerEngine.processSpectrum` if you want true frequency bins.
+
+## License
+
+Released under the [MIT License](LICENSE).
